@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.raulblideran.ApricotStudio</id>
+
+  <name>Apricot Studio</name>
+  <summary>Trim a clip from a video without re-encoding decisions</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <developer id="io.github.raulblideran">
+    <name>Raul Blideran</name>
+  </developer>
+
+  <description>
+    <p>
+      Apricot Studio does one thing: it takes a video, lets you mark a start and
+      an end, and writes out that section. It is built for pulling a highlight
+      out of a screen-recorder replay buffer without opening a full editor.
+    </p>
+    <p>
+      There are no export settings to answer. Every parameter is read from the
+      file you opened — container, codec, resolution, frame rate, colour, GOP
+      structure and bitrate — so the clip behaves like the recording it came
+      from. Audio is stream-copied rather than re-encoded, so it takes no loss
+      at all.
+    </p>
+    <p>
+      When the start of your selection lands on a keyframe, nothing needs to be
+      decoded and the clip is copied straight out of the source: near-instant,
+      and byte-for-byte identical. The app tells you which of the two paths an
+      export will take before you run it.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Frame-exact cuts at both ends</li>
+      <li>Instant, lossless export when the cut starts on a keyframe</li>
+      <li>Timeline with a filmstrip, audio waveform and keyframe markers</li>
+      <li>Quality presets that scale against the source, or a target file size</li>
+      <li>WebM and GIF export</li>
+      <li>Per-track audio selection for recordings with separate mic and desktop</li>
+      <li>Optionally move the original to the wastebasket after exporting</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.raulblideran.ApricotStudio.desktop</launchable>
+
+  <url type="homepage">https://github.com/raulblideran/apricot-studio-rust</url>
+  <url type="bugtracker">https://github.com/raulblideran/apricot-studio-rust/issues</url>
+  <url type="vcs-browser">https://github.com/raulblideran/apricot-studio-rust</url>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+    <category>AudioVideoEditing</category>
+  </categories>
+
+  <keywords>
+    <keyword>clip</keyword>
+    <keyword>trim</keyword>
+    <keyword>cut</keyword>
+    <keyword>video</keyword>
+    <keyword>ffmpeg</keyword>
+  </keywords>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.0.0" date="2026-08-23">
+      <description>
+        <p>
+          First release. Apricot Studio takes a video, lets you mark a start and
+          an end, and writes out that section -- with no export settings to
+          answer, because every parameter is read from the file you opened.
+        </p>
+        <ul>
+          <li>Frame-exact cuts, and an instant bit-identical copy when the cut starts on a keyframe</li>
+          <li>Timeline with a filmstrip, audio waveform and keyframe markers</li>
+          <li>Quality presets that scale against the source, or a target file size</li>
+          <li>WebM and GIF export, and per-track audio for captures with separate mic and desktop</li>
+          <li>Two themes: Default, and Cyberpunk in crimson and teal with its own typeface</li>
+          <li>Optionally move the original to the wastebasket after exporting</li>
+        </ul>
+        <p>
+          This replaces the Python version of the same application. The ffmpeg
+          commands behind every export are unchanged, argument for argument, and
+          your theme, accent and recent files carry over the first time you run
+          it.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>

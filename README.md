@@ -4,7 +4,8 @@ A small video trimmer. Open a file, mark in and out, export the clip.
 The export inherits every setting from the source, so there is nothing to configure.
 
 Built for pulling a highlight out of a gpu-screen-recorder replay buffer without
-opening kdenlive or DaVinci. Runs on Linux, Windows and macOS.
+opening kdenlive or DaVinci. Packaged for Linux as a Flatpak; it builds and runs
+on Windows and macOS too, though neither is released yet.
 
 <img src="packaging/io.github.raulblideran.ApricotStudio.svg" width="96" alt="Apricot Studio">
 
@@ -13,7 +14,7 @@ opening kdenlive or DaVinci. Runs on Linux, Windows and macOS.
 ### Linux, as a Flatpak
 
 Download `apricot-studio.flatpak` from the
-[latest release](https://github.com/raulblideran/apricot-studio/releases), then:
+[latest release](https://github.com/raulblideran/apricot-studio-rust/releases), then:
 
 ```sh
 flatpak install --user apricot-studio.flatpak
@@ -45,26 +46,17 @@ manifest builds with `--share=network` so cargo can fetch its crates, which is
 fine locally and not allowed on Flathub — `packaging/flatpak/generate-cargo-sources.sh`
 writes the offline crate list that replaces it.
 
-### Windows
+### Windows and macOS
 
-```powershell
-pwsh packaging\windows\build.ps1 -BundleFfmpeg
-```
+The code builds and its tests pass on both — CI compiles it on `windows-latest`
+and `macos-latest` on every push — but neither is packaged or released yet, so
+there is no `.exe` and no `.app` to download.
 
-Produces `dist\ApricotStudio-windows-x64.zip`: one `.exe` plus `ffmpeg.exe` and
-`ffprobe.exe` beside it. Without `-BundleFfmpeg` the app expects them on `PATH`
-(`winget install Gyan.FFmpeg`) and says so plainly if they are not there.
-
-### macOS
-
-```sh
-packaging/macos/bundle.sh --bundle-ffmpeg
-```
-
-Produces `dist/Apricot Studio.app`, signed ad-hoc so it starts on the machine
-that built it. Without `--bundle-ffmpeg` it uses Homebrew's (`brew install ffmpeg`).
-If both `aarch64-apple-darwin` and `x86_64-apple-darwin` are installed the binary
-is universal.
+From a checkout, `cargo build --release` produces a working binary on either.
+The app looks for `ffmpeg` and `ffprobe` beside its own executable before
+falling back to `PATH`, so put them in the same folder or install them
+(`winget install Gyan.FFmpeg`, `brew install ffmpeg`). With neither, the app
+still starts and says exactly what is missing.
 
 ### Straight from the source tree (Linux)
 

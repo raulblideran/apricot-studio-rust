@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Apricot Studio
+GenericName=Video Trimmer
+Comment=Cut a clip from a video, keeping the source file's settings
+Exec=apricot-studio %f
+TryExec=apricot-studio
+Icon=io.github.raulblideran.ApricotStudio
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+Keywords=clip;trim;cut;video;ffmpeg;
+MimeType=video/mp4;video/x-matroska;video/quicktime;video/webm;video/x-msvideo;video/mpeg;video/x-flv;video/x-ms-wmv;video/mp2t;video/3gpp;
+StartupNotify=true
+StartupWMClass=io.github.raulblideran.ApricotStudio

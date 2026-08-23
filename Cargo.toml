@@ -1,0 +1,40 @@
+[package]
+name = "apricot-studio"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A small video trimmer: open a file, mark in and out, export the clip"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/raulblideran/apricot-studio-rust"
+default-run = "apricot-studio"
+
+[dependencies]
+# The window. glow rather than wgpu: one less layer to explain when a driver
+# misbehaves, and this interface is flat rectangles and text.
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts", "glow", "wayland", "x11",
+] }
+egui = "0.36"
+# The file chooser. On Linux this is the XDG portal, which is what lets a
+# sandboxed build reach a file outside the folders it was granted.
+rfd = "0.17"
+# The wastebasket, per platform: freedesktop trash spec, Recycle Bin, Finder.
+trash = "5"
+# Preview audio.
+cpal = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+# Only for the window icon, which ships as a PNG.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+# Drives the window headlessly: builds real frames, finds widgets by
+# their accessibility labels, and clicks them.
+egui_kittest = "0.36"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

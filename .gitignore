@@ -1,0 +1,98 @@
+# ---- Rust ----------------------------------------------------------------
+# The build directory is the big one: several gigabytes of intermediates for a
+# 13 MB binary.
+/target/
+**/*.rs.bk
+*.pdb
+*.profraw
+
+# Cargo.lock is deliberately NOT ignored. This is a binary crate, not a
+# library: the lock file is what makes a build reproducible, and it is what CI
+# builds from.
+
+# ---- Flatpak -------------------------------------------------------------
+# flatpak-builder writes all of these beside the manifest. The build trees
+# inside .flatpak-builder hold the extracted sources for x264, x265 and ffmpeg,
+# and reach several gigabytes on their own.
+.flatpak-builder/
+build-dir/
+repo/
+*.flatpak
+*.flatpakref
+
+# packaging/flatpak/cargo-sources.json is NOT ignored. It is generated, but a
+# Flathub submission has to carry it -- which is the whole point of generating
+# it.
+
+# ---- What the platform packaging scripts produce -------------------------
+# build.ps1 and bundle.sh both write into dist/; the rest is what they leave
+# behind when run from somewhere else.
+dist/
+*.zip
+*.dmg
+*.msi
+*.exe
+*.app/
+
+# ---- Editors and IDEs ----------------------------------------------------
+.vscode/
+.idea/
+*.iml
+.zed/
+.helix/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+
+# ---- Operating system leavings -------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ---- Profiling, coverage, crash dumps ------------------------------------
+perf.data
+perf.data.old
+flamegraph.svg
+/coverage/
+*.gcda
+*.gcno
+core
+core.[0-9]*
+
+# ---- Local machine state -------------------------------------------------
+# Per-checkout settings and environment, none of which belongs to anyone else.
+.claude/settings.local.json
+.direnv/
+.envrc
+*.log
+
+# The test suite writes its settings to APRICOT_CONFIG_DIR and its fixtures to
+# the system temporary directory, so neither lands here -- but a run pointed at
+# the tree would put them in one of these.
+/scratch/
+
+# ---- Kept locally, not carried in the repo -------------------------------
+# Windows and macOS are not shipped yet, and their packaging scripts are the
+# only part of the tree that exists purely to serve them. They still work from
+# a checkout of this machine -- they are simply not what the repository is for.
+# The three packaging files beside them stay tracked: tests/units.rs compiles
+# the manifest, the desktop entry and the metainfo in and asserts on them.
+/packaging/windows/
+/packaging/macos/
+
+# The built bundle is a release asset, uploaded to the release page rather than
+# committed. Already matched by *.flatpak above; named here so it is obvious.
+/apricot-studio.flatpak
+
+# ---- Generated, but still committed --------------------------------------
+# assets/icon-256.png is rendered from the SVG, and src/main.rs pulls it in
+# with include_bytes!, so a checkout without it does not compile. It stays
+# tracked; this note exists so nobody adds it to the list above.

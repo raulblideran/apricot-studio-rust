@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>Apricot Studio</title>
+  <!--
+    Drawn for Qt's SVG renderer, which is Tiny 1.2. Gradients and opacity work;
+    <filter> does not, and clipPath is silently ignored (a clipped rect paints
+    over the whole canvas), so there is no blur and no scanline overlay here.
+    Every glow is concentric strokes at falling opacity instead, which has the
+    happy side effect of degrading well: by 16px the neon has thinned to nothing
+    and what is left is a dark tile with an orange fruit on it, which is what an
+    icon that small can say anyway.
+  -->
+  <defs>
+    <linearGradient id="flesh" x1="0.12" y1="0.02" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#f6a24c"/>
+      <stop offset="0.45" stop-color="#e27125"/>
+      <stop offset="1" stop-color="#8f3110"/>
+    </linearGradient>
+    <linearGradient id="leaf" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- plate -->
+  <rect x="4" y="4" width="120" height="120" rx="27" fill="#0b0e14"/>
+  <rect x="4.75" y="4.75" width="118.5" height="118.5" rx="26.25"
+        fill="none" stroke="#1b2330" stroke-width="1.5"/>
+
+  <!-- Everything but the plate, sized as one. Drawn against a 128 grid and
+       then scaled, so the fruit carries the tile at 16px instead of floating in
+       the middle of it. -->
+  <g transform="translate(64,64) scale(1.08) translate(-64,-64)">
+
+  <!-- stem, behind the fruit and under the leaf -->
+  <path d="M 64 42 C 64.5 36 65 33 66.5 30" fill="none" stroke="#115e59"
+        stroke-width="3.4" stroke-linecap="round"/>
+
+  <!-- the apricot -->
+  <path d="M 64 40 C 79 33 101 44 103 68 C 105 92 87 111 64 111
+           C 41 111 23 92 25 68 C 27 44 49 33 64 40 Z" fill="url(#flesh)"/>
+
+  <!-- volume: one soft highlight where the key light lands -->
+  <ellipse cx="47" cy="57" rx="10" ry="6.5" fill="#ffffff" opacity="0.13"
+           transform="rotate(-32 47 57)"/>
+
+  <!-- cyan rim light down the left edge, three passes for the glow -->
+  <g fill="none" stroke="#22d3ee" stroke-linecap="round">
+    <path d="M 45 106 C 31 99 24 85 26 68 C 27.5 55 36 45 47 40"
+          stroke-width="7" opacity="0.14"/>
+    <path d="M 45 106 C 31 99 24 85 26 68 C 27.5 55 36 45 47 40"
+          stroke-width="4" opacity="0.34"/>
+    <path d="M 45 106 C 31 99 24 85 26 68 C 27.5 55 36 45 47 40"
+          stroke-width="2.1" opacity="0.95"/>
+  </g>
+
+  <!-- magenta rim light down the right edge -->
+  <g fill="none" stroke="#d926a9" stroke-linecap="round">
+    <path d="M 83 106 C 97 99 104 85 102 68 C 100.5 55 92 45 81 40"
+          stroke-width="7" opacity="0.14"/>
+    <path d="M 83 106 C 97 99 104 85 102 68 C 100.5 55 92 45 81 40"
+          stroke-width="4" opacity="0.34"/>
+    <path d="M 83 106 C 97 99 104 85 102 68 C 100.5 55 92 45 81 40"
+          stroke-width="2.1" opacity="0.95"/>
+  </g>
+
+  <!-- the crease, lit like a seam of circuitry -->
+  <g fill="none" stroke="#5eead4" stroke-linecap="round">
+    <path d="M 63 44 C 58 60 58 84 65 106" stroke-width="6" opacity="0.10"/>
+    <path d="M 63 44 C 58 60 58 84 65 106" stroke-width="3.2" opacity="0.30"/>
+    <path d="M 63 44 C 58 60 58 84 65 106" stroke-width="1.6" opacity="0.95"/>
+    <!-- traces branching off it, the one nod to circuitry -->
+    <path d="M 59.7 63.3 H 72.5" stroke-width="1.2" opacity="0.45"/>
+    <path d="M 60.7 87.3 H 49.5" stroke-width="1.2" opacity="0.45"/>
+  </g>
+  <g fill="#5eead4">
+    <circle cx="59.7" cy="63.3" r="2.4"/>
+    <circle cx="60.7" cy="87.3" r="2.4"/>
+    <circle cx="72.5" cy="63.3" r="1.5" opacity="0.6"/>
+    <circle cx="49.5" cy="87.3" r="1.5" opacity="0.6"/>
+  </g>
+  <g fill="none" stroke="#5eead4" opacity="0.22">
+    <circle cx="59.7" cy="63.3" r="4.6" stroke-width="1"/>
+    <circle cx="60.7" cy="87.3" r="4.6" stroke-width="1"/>
+  </g>
+
+  <!-- leaf -->
+  <path d="M 65 39 C 73 25 90 19 101 21 C 100 34 87 43 69 41 Z" fill="url(#leaf)"/>
+  <path d="M 67 39.5 C 77 33 89 27 98 22.5" fill="none" stroke="#a7f3d0"
+        stroke-width="1.2" stroke-linecap="round" opacity="0.75"/>
+
+  </g>
+</svg>

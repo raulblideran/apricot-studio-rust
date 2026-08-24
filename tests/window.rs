@@ -26,6 +26,7 @@ use std::rc::Rc;
 
 use apricot_studio::app::{App, Pickers};
 use apricot_studio::settings::Settings;
+use apricot_studio::ui::chrome;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
@@ -371,6 +372,140 @@ fn typing_a_timecode_is_never_intercepted() {
         !window.with(App::is_playing),
         "Space in a text field must not start playback"
     );
+}
+
+// ----- dropping a file on the window --------------------------------------
+
+/// A file egui says was dropped. The real one comes from whichever backend
+/// reported the drop; this is the same thing with no window behind it.
+#[derive(Debug)]
+struct Dropped(std::path::PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|error| error.to_string())
+    }
+}
+
+impl Window {
+    /// Hand the window a file the way a backend that supports drops would.
+    fn drop_file(&mut self, path: &str) {
+        self.harness
+            .input_mut()
+            .dropped_files
+            .push(std::sync::Arc::new(Dropped(path.into())));
+        self.harness.run_steps(STEPS);
+    }
+}
+
+#[test]
+fn a_dropped_video_opens() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let clip = fixture("allp");
+    let mut window = Window::open(None);
+    assert!(!window.with(App::is_loaded));
+
+    window.drop_file(&clip);
+    window.settle();
+    assert!(
+        window.with(App::is_loaded),
+        "the drop should have opened it"
+    );
+    assert_eq!(
+        window.with(|app| app.source_path().map(str::to_string)),
+        Some(clip)
+    );
+}
+
+#[test]
+fn a_dropped_file_that_is_not_a_video_says_so() {
+    // Silence here is indistinguishable from a drop that never arrived, which
+    // is exactly how the Wayland gap looked before there was a message.
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let note = dir.path().join("notes.txt");
+    std::fs::write(&note, "not a video").expect("the scratch file");
+
+    let mut window = Window::open(None);
+    window.drop_file(&note.to_string_lossy());
+    assert!(!window.with(App::is_loaded));
+    let status = window.with(|app| app.status().to_string());
+    assert!(status.contains("notes.txt"), "{status}");
+    assert!(status.contains("not a video"), "{status}");
+}
+
+#[test]
+fn a_drop_during_a_dialog_is_thrown_away_rather_than_queued() {
+    // Swapping the open file out from under a question is answering it for a
+    // file that is no longer open -- and holding the drop until the dialog is
+    // answered would open it later, out of nowhere.
+    if !have_ffmpeg() {
+        return;
+    }
+    let clip = fixture("allp");
+    let mut window = Window::open(Some("/tmp/definitely-not-here-3b1f9.mp4".into()));
+    assert!(
+        window.with(|app| app.dialog_text().is_some()),
+        "the dialog should be up"
+    );
+
+    window.drop_file(&clip);
+    assert!(
+        !window.with(App::is_loaded),
+        "a drop landed while a dialog was waiting to be answered"
+    );
+
+    window.edit(App::dismiss_dialog);
+    window.settle();
+    assert!(
+        !window.with(App::is_loaded),
+        "the discarded drop came back once the dialog closed"
+    );
+
+    window.drop_file(&clip);
+    window.settle();
+    assert!(window.with(App::is_loaded), "and a fresh drop still lands");
+}
+
+#[test]
+fn the_picture_is_kept_out_of_the_scanlines() {
+    // The pure geometry is measured in tests/theme.rs. What matters here is the
+    // wiring: that a window actually showing a frame reports where it drew it,
+    // because a rect that is never filled in cuts nothing out of anything.
+    let Some(mut window) = loaded_window() else {
+        return;
+    };
+    window.click("Theme");
+    window.click("Cyberpunk");
+
+    let picture = window.with(App::video_rect).expect("a frame is on screen");
+    assert!(
+        picture.width() > 1.0 && picture.height() > 1.0,
+        "{picture:?}"
+    );
+    let screen = window.harness.ctx.content_rect();
+    for [a, b] in chrome::scanline_segments(screen, Some(picture)) {
+        assert!(
+            b.x <= picture.left()
+                || a.x >= picture.right()
+                || a.y < picture.top()
+                || a.y > picture.bottom(),
+            "a scanline crosses the picture at y={}",
+            a.y
+        );
+    }
+
+    // And with nothing open there is no picture to protect, so the empty window
+    // keeps the full overlay.
+    let mut empty = Window::open(None);
+    empty.click("Theme");
+    empty.click("Cyberpunk");
+    assert!(empty.with(App::video_rect).is_none());
 }
 
 // ----- themes and accents -------------------------------------------------

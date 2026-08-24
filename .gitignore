@@ -89,8 +89,10 @@ core.[0-9]*
 /packaging/macos/
 
 # The built bundle is a release asset, uploaded to the release page rather than
-# committed. Already matched by *.flatpak above; named here so it is obvious.
-/apricot-studio.flatpak
+# committed. It carries the version in its name, so a download is identifiable
+# once it has left the release page. Already matched by *.flatpak above; named
+# here so it is obvious.
+/apricot-studio-*.flatpak
 
 # ---- Generated, but still committed --------------------------------------
 # assets/icon-256.png is rendered from the SVG, and src/main.rs pulls it in

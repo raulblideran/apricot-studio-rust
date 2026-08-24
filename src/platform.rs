@@ -69,6 +69,87 @@ pub fn file_uri(path: &str) -> String {
     uri
 }
 
+/// The paths in a `text/uri-list` payload -- the other end of [`file_uri`].
+///
+/// This is what a desktop hands over when a file is dropped on the window: CRLF
+/// between entries, `#` for a comment, and everything a parser could trip over
+/// percent-encoded, which is why "my clip #2.mp4" arrives as `my%20clip%20%232`
+/// and has to come back out again.
+///
+/// Anything that is not a local file -- a URL dragged out of a browser, the
+/// `x-special/` payloads some file managers add -- is dropped here rather than
+/// further in, so the caller only ever sees paths.
+pub fn paths_from_uri_list(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // A bare path is not to spec, but senders do it, and the alternative is
+        // a drop that silently does nothing.
+        let rest = match line.strip_prefix("file://") {
+            Some(rest) => rest.strip_prefix("localhost").unwrap_or(rest),
+            None if line.starts_with('/') => line,
+            None => continue,
+        };
+        if !rest.starts_with('/') {
+            continue;
+        }
+        let decoded = percent_decode(rest);
+        // `file:///C:/clip.mp4` puts a slash in front of the drive letter, and
+        // nothing on Windows opens a path that starts with one. Handled here
+        // rather than behind a cfg, so the rule is compiled and tested on every
+        // platform rather than only on the one that needs it. The slashes
+        // themselves are left alone: Windows takes either kind.
+        let decoded = match decoded.strip_prefix('/') {
+            Some(rest) if drive_letter(rest) => rest.to_string(),
+            _ => decoded,
+        };
+        if !decoded.is_empty() {
+            paths.push(decoded);
+        }
+    }
+    paths
+}
+
+/// Whether a path begins `C:`, which is a drive rather than a directory.
+fn drive_letter(path: &str) -> bool {
+    let mut chars = path.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.next() == Some(':')
+}
+
+/// `%20` back to a space, and every other escape back to its byte.
+///
+/// Byte-wise rather than char-wise: a percent escape encodes one byte of UTF-8,
+/// so a non-ASCII filename arrives as several of them and only makes sense once
+/// they have been put back together.
+fn percent_decode(text: &str) -> String {
+    let hex = |byte: u8| (byte as char).to_digit(16);
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Indexed by byte rather than by char on purpose: slicing the string
+        // two bytes past a % would land in the middle of an accented character
+        // that was never escaped in the first place.
+        let escape = (bytes[i] == b'%' && i + 2 < bytes.len())
+            .then(|| Some(hex(bytes[i + 1])? * 16 + hex(bytes[i + 2])?))
+            .flatten();
+        match escape {
+            Some(byte) => {
+                out.push(byte as u8);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Open the file manager with `path` selected, falling back to its folder.
 ///
 /// Detached rather than waited on: nothing here cares when a file manager

@@ -9,6 +9,7 @@
 //! without opening a window.
 
 pub mod app;
+pub mod dnd;
 pub mod export;
 pub mod ffmpeg;
 pub mod media;

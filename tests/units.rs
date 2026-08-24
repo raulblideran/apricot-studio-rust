@@ -13,6 +13,7 @@ use apricot_studio::app::{delete_candidate, delete_prompt, Exported, MIN_CLIP_BY
 use apricot_studio::export::{self, Audio, Format, Options, Quality};
 use apricot_studio::media::{self, AudioTrack};
 use apricot_studio::paths;
+use apricot_studio::platform;
 use apricot_studio::ui::chrome;
 use common::sample_info;
 
@@ -427,6 +428,86 @@ fn a_dotfile_is_not_an_extension() {
 fn absolute_paths_compare_equal_however_they_are_written() {
     assert!(paths::same_file("/tmp/./clip.mp4", "/tmp/a/../clip.mp4"));
     assert!(!paths::same_file("/tmp/clip.mp4", "/tmp/other.mp4"));
+}
+
+// ----- what a desktop hands over when a file is dropped -------------------
+
+#[test]
+fn a_dropped_file_arrives_as_a_uri() {
+    let dropped = platform::paths_from_uri_list("file:///home/me/Videos/replay.mp4\r\n");
+    assert_eq!(dropped, ["/home/me/Videos/replay.mp4"]);
+}
+
+#[test]
+fn the_escapes_come_back_out() {
+    // The other end of platform::file_uri: a space is %20, and a # would have
+    // ended the URI early had it not been escaped in the first place.
+    let dropped = platform::paths_from_uri_list("file:///tmp/my%20clip%20%232.mp4");
+    assert_eq!(dropped, ["/tmp/my clip #2.mp4"]);
+    assert_eq!(
+        platform::paths_from_uri_list(&platform::file_uri("/tmp/Å ëñ – cut.mkv")),
+        ["/tmp/Å ëñ – cut.mkv"],
+        "a round trip through the encoder survives"
+    );
+}
+
+#[test]
+fn several_files_at_once() {
+    let list = "file:///a.mp4\r\nfile:///b.mkv\r\n";
+    assert_eq!(platform::paths_from_uri_list(list), ["/a.mp4", "/b.mkv"]);
+}
+
+#[test]
+fn comments_and_blank_lines_are_not_files() {
+    let list = "# a comment\r\n\r\nfile:///c.mp4\r\n";
+    assert_eq!(platform::paths_from_uri_list(list), ["/c.mp4"]);
+}
+
+#[test]
+fn only_local_files_come_through() {
+    // A drag out of a browser, and the bookkeeping some file managers add.
+    let list = "https://example.com/clip.mp4\r\nx-special/nautilus-clipboard\r\n";
+    assert!(platform::paths_from_uri_list(list).is_empty());
+}
+
+#[test]
+fn a_windows_drive_loses_the_slash_in_front_of_it() {
+    // file:///C:/clip.mp4 is the spec-correct spelling, and the leading slash
+    // is part of the URI rather than part of the path.
+    assert_eq!(
+        platform::paths_from_uri_list("file:///C:/Videos/replay.mp4"),
+        ["C:/Videos/replay.mp4"]
+    );
+    // A directory that merely starts with a letter keeps its slash.
+    assert_eq!(
+        platform::paths_from_uri_list("file:///Camera/replay.mp4"),
+        ["/Camera/replay.mp4"]
+    );
+}
+
+#[test]
+fn the_shapes_a_sender_may_use() {
+    // localhost is spelled out by some senders, and a bare path by others,
+    // neither of which is worth losing a drop over.
+    assert_eq!(
+        platform::paths_from_uri_list("file://localhost/tmp/d.mp4"),
+        ["/tmp/d.mp4"]
+    );
+    assert_eq!(platform::paths_from_uri_list("/tmp/e.mp4"), ["/tmp/e.mp4"]);
+}
+
+#[test]
+fn a_truncated_escape_is_left_alone_rather_than_dropped() {
+    // Nothing sends this, but a parser that panics on it takes the window with
+    // it, and a percent is a legal character in a filename.
+    assert_eq!(
+        platform::paths_from_uri_list("/tmp/100%.mp4"),
+        ["/tmp/100%.mp4"]
+    );
+    assert_eq!(
+        platform::paths_from_uri_list("/tmp/a%zz.mp4"),
+        ["/tmp/a%zz.mp4"]
+    );
 }
 
 // ----- packaging ----------------------------------------------------------

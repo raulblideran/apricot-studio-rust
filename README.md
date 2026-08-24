@@ -13,11 +13,11 @@ on Windows and macOS too, though neither is released yet.
 
 ### Linux, as a Flatpak
 
-Download `apricot-studio.flatpak` from the
+Download `apricot-studio-<version>.flatpak` from the
 [latest release](https://github.com/raulblideran/apricot-studio-rust/releases), then:
 
 ```sh
-flatpak install --user apricot-studio.flatpak
+flatpak install --user apricot-studio-1.1.0.flatpak
 ```
 
 Nothing else needed — the bundle carries its own ffmpeg built with libx264 and
@@ -32,8 +32,13 @@ flatpak install --user flathub org.flatpak.Builder \
 flatpak run org.flatpak.Builder --user --force-clean --install \
     --repo=repo build-dir packaging/io.github.raulblideran.ApricotStudio.yaml
 
+# The version comes out of Cargo.toml rather than being typed, because a
+# bundle named after the release before it is a mistake nobody notices until
+# someone reports a bug against the wrong version.
+VERSION=$(sed -n '3s/version = "\(.*\)"/\1/p' Cargo.toml)
+
 flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
-    repo apricot-studio.flatpak io.github.raulblideran.ApricotStudio master
+    repo "apricot-studio-$VERSION.flatpak" io.github.raulblideran.ApricotStudio master
 ```
 
 **`--runtime-repo` is not optional.** Without it the bundle names the runtime it
@@ -110,6 +115,10 @@ apricot-studio --version           # answers without opening a window
 ```
 
 You can also drop a video onto the window, or pick one from **Recent**.
+Dropping works on Wayland too, which took some doing: the window toolkit has no
+Wayland drag-and-drop at all, and a compositor hands a drag to exactly one of a
+client's data devices — the first it created, which belongs to the clipboard.
+So the drag is taken where it lands. See `vendor/smithay-clipboard/VENDORING.md`.
 
 | | |
 |---|---|
@@ -243,8 +252,10 @@ exception: red already meant "this will delete your original", so under a crimso
 accent the warning moved to **hazard orange** `#ff5c00`, ΔE 49 away. The scanlines
 are drawn light — a dark line on near-black shifts the pixel by one value in 255,
 passing every contrast test while not existing — and stay faint enough to hold the
-worst case at 5.13:1. There is no vignette; it would push the delete colour under
-the floor at exactly the foot of the window where that checkbox sits.
+worst case at 5.13:1. They stop at the picture: over the interface they are
+texture, over a decoded frame they are dirt on someone's footage. There is no
+vignette; it would push the delete colour under the floor at exactly the foot of
+the window where that checkbox sits.
 
 ## Accent colour
 
@@ -317,7 +328,9 @@ playhead does not start a decoder per pixel.
 | `src/ui/chrome.rs` | notched buttons, scanlines, glitch — what a style cannot express |
 | `src/ui/dialogs.rs` | the modal boxes, as data |
 | `src/settings.rs` | what is remembered between launches |
-| `src/platform.rs` | show in folder, wastebasket, delete |
+| `src/platform.rs` | show in folder, wastebasket, delete, the uri-list a drop arrives as |
+| `src/dnd.rs` | dropping a file on the window, on Wayland, where winit does not |
+| `vendor/smithay-clipboard/` | that crate with its drag-and-drop stubs filled in — `VENDORING.md` says why |
 | `src/ffmpeg.rs` | finding ffmpeg on three platforms |
 | `assets/fonts/` | Rajdhani, the Cyberpunk theme's typeface, under the OFL |
 | `tests/` | the test suite |
@@ -325,20 +338,20 @@ playhead does not start a decoder per pixel.
 ## Tests
 
 ```sh
-./run-tests.sh           # 269 tests, ~20s (real encodes)
+./run-tests.sh           # 282 tests, ~20s (real encodes)
 ./run-tests.sh --fast    # ~13s, skips anything that invokes ffmpeg
 ./run-tests.sh -v        # one line per test
 ```
 
 | Module | Covers |
 |---|---|
-| `units.rs` | timecode, output naming, keyframe matching, size arithmetic, track labels, chamfer geometry, deletion safety, packaging completeness |
+| `units.rs` | timecode, output naming, keyframe matching, size arithmetic, track labels, chamfer geometry, deletion safety, dropped-file URIs, packaging completeness |
 | `commands.rs` | the ffmpeg arguments produced for every combination of options |
 | `edges.rs` | malformed input, hostile filenames, degenerate ranges, unreadable sources |
 | `encode.rs` | real exports: bit-identity, durations, A/V sync, GOP structure, formats |
 | `theme.rs` | per-theme palette contrast, distinctness, and scanline legibility |
 | `sandbox.rs` | telling a hidden folder from a missing file, and the command offered for it |
-| `window.rs` | real frames, real clicks: loading, marks, keyboard, themes, exporting |
+| `window.rs` | real frames, real clicks: loading, dropping, marks, keyboard, themes, exporting |
 
 Fixtures are synthesised with ffmpeg into a temporary directory, so the suite never
 reads your video library, and `APRICOT_CONFIG_DIR` is redirected so it never writes

@@ -437,6 +437,59 @@ fn the_scanlines_are_drawn_light_not_dark() {
 }
 
 #[test]
+fn the_scanlines_stop_at_the_picture() {
+    // The overlay is texture over things the app drew. Over a decoded frame it
+    // is texture over someone's footage, which is a different thing entirely,
+    // so the picture rect is cut out of every line that crosses it.
+    let screen = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(900.0, 620.0));
+
+    // A pillarboxed video: lines continue either side of it, never across it.
+    let picture = egui::Rect::from_min_max(egui::pos2(200.0, 100.0), egui::pos2(700.0, 400.0));
+    let segments = chrome::scanline_segments(screen, Some(picture));
+    for [a, b] in &segments {
+        assert_eq!(a.y, b.y, "a scanline is horizontal");
+        assert!(
+            b.x <= picture.left()
+                || a.x >= picture.right()
+                || a.y < picture.top()
+                || a.y > picture.bottom(),
+            "a line at y={} runs {}..{} across the picture",
+            a.y,
+            a.x,
+            b.x
+        );
+    }
+    // And the sides are still drawn, rather than the rows being dropped.
+    assert!(
+        segments
+            .iter()
+            .any(|[a, _]| a.y > picture.top() && a.y < picture.bottom() && a.x < picture.left()),
+        "the letterbox either side keeps its lines"
+    );
+
+    // A video as wide as the window: those rows disappear rather than leaving
+    // a dot on each edge.
+    let full = egui::Rect::from_min_max(egui::pos2(0.0, 150.0), egui::pos2(900.0, 450.0));
+    assert!(
+        !chrome::scanline_segments(screen, Some(full))
+            .iter()
+            .any(|[a, _]| a.y > full.top() && a.y < full.bottom()),
+        "a full-width picture leaves no fragments behind"
+    );
+
+    // Nothing to protect is the old full-bleed overlay, unchanged -- which is
+    // what keeps the empty window and the Default theme where they were.
+    let bare = chrome::scanline_segments(screen, None);
+    assert_eq!(
+        bare.len(),
+        (screen.height() / chrome::SCANLINE_GAP).ceil() as usize
+    );
+    for [a, b] in &bare {
+        assert_eq!((a.x, b.x), (screen.left(), screen.right()));
+    }
+}
+
+#[test]
 fn only_a_theme_that_asks_for_them_gets_the_extras() {
     assert!(!theme::DEFAULT.scanlines);
     assert!(!theme::DEFAULT.glitch);

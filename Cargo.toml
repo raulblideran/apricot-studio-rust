@@ -1,6 +1,6 @@
 [package]
 name = "apricot-studio"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "A small video trimmer: open a file, mark in and out, export the clip"
@@ -28,11 +28,27 @@ dirs = "6"
 # Only for the window icon, which ships as a PNG.
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Not for the clipboard -- egui-winit already uses this crate for that -- but
+# for the files dropped on the window, which arrive on the data device it owns.
+# Redirected to the vendored copy by [patch.crates-io] below.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+smithay-clipboard = "0.7"
+
 [dev-dependencies]
 # Drives the window headlessly: builds real frames, finds widgets by
 # their accessibility labels, and clicks them.
 egui_kittest = "0.36"
 tempfile = "3"
+
+# Drag and drop on Wayland, which winit does not implement: its Wayland backend
+# has no wl_data_device at all, so `dropped_files` is empty on every Wayland
+# session however the window is configured. The device it needs already exists
+# -- egui-winit opens one for the clipboard -- and a compositor delivers a drag
+# to one device per client, so a second one is not an option. This is that
+# crate with the drag-and-drop stubs filled in; vendor/smithay-clipboard/
+# VENDORING.md is the whole story and the whole patch.
+[patch.crates-io]
+smithay-clipboard = { path = "vendor/smithay-clipboard" }
 
 [profile.release]
 opt-level = 3

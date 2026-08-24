@@ -403,32 +403,61 @@ fn glitch_offset(ui: &Ui, look: &Look, response: &Response, enabled: bool) -> Op
     }
 }
 
-/// Horizontal lines over the whole window.
+/// The overlay's line segments, with `clear` cut out of them.
+///
+/// Separated from the painting so the one rule that matters here -- that no
+/// segment ever crosses the picture -- is a test rather than a look at the
+/// screen.
+pub fn scanline_segments(screen: Rect, clear: Option<Rect>) -> Vec<[Pos2; 2]> {
+    let mut segments = Vec::new();
+    let mut push = |y: f32, from: f32, to: f32| {
+        // Anything under a pixel wide is not a line, it is a dot on the edge of
+        // the picture. The usual case is a video as wide as the window, where
+        // both side pieces vanish and the row is skipped entirely.
+        if to - from >= 1.0 {
+            segments.push([Pos2::new(from, y), Pos2::new(to, y)]);
+        }
+    };
+    let mut y = screen.top();
+    while y < screen.bottom() {
+        match clear {
+            Some(clear) if y >= clear.top() && y <= clear.bottom() => {
+                push(y, screen.left(), clear.left());
+                push(y, clear.right(), screen.right());
+            }
+            _ => push(y, screen.left(), screen.right()),
+        }
+        y += SCANLINE_GAP;
+    }
+    segments
+}
+
+/// Horizontal lines over the whole window, except `clear`.
 ///
 /// Drawn into a layer above every control, so nothing has to know it is there,
 /// and with no input sense at all, so it cannot swallow a click on the timeline
 /// underneath.
 ///
+/// `clear` is the picture, when there is one. It is the single surface the
+/// overlay has to leave alone: everywhere else the lines are texture over
+/// something the app drew, but over a decoded frame they are texture over
+/// someone's footage, which is not decoration any more, it is dirt.
+///
 /// The alpha is deliberately low. tests/theme.rs checks that text still clears
 /// the 4.5:1 contrast floor with the overlay on top, because a decoration that
 /// makes a timecode harder to read has cost more than it gave.
-pub fn scanlines(ctx: &egui::Context, look: &Look) {
+pub fn scanlines(ctx: &egui::Context, look: &Look, clear: Option<Rect>) {
     if !look.theme.scanlines {
         return;
     }
-    let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         Id::new("scanlines"),
     ));
     let colour = theme::c32a(SCANLINE_COLOUR, SCANLINE_ALPHA);
-    let mut y = screen.top();
-    while y < screen.bottom() {
-        painter.line_segment(
-            [Pos2::new(screen.left(), y), Pos2::new(screen.right(), y)],
-            Stroke::new(1.0, colour),
-        );
-        y += SCANLINE_GAP;
+    let stroke = Stroke::new(1.0, colour);
+    for segment in scanline_segments(ctx.content_rect(), clear) {
+        painter.line_segment(segment, stroke);
     }
 }
 

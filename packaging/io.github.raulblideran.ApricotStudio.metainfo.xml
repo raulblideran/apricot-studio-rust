@@ -75,6 +75,22 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.1.0" date="2026-08-24">
+      <description>
+        <p>
+          Dropping a video onto the window now works on Wayland. It never had:
+          the window toolkit implements drag-and-drop on X11, Windows and macOS
+          and not on Wayland at all, so the app was reading a list that was
+          always empty. It now speaks that part of the Wayland protocol itself.
+        </p>
+        <ul>
+          <li>Drag-and-drop on Wayland, alongside the X11, Windows and macOS support that already worked</li>
+          <li>The picture says "Drop to open" while a file is held over the window</li>
+          <li>A dropped file that is not a video is named and refused, rather than silently ignored</li>
+          <li>The Cyberpunk theme's scanlines stop at the picture: over the interface they are texture, over your footage they were dirt</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-08-23">
       <description>
         <p>

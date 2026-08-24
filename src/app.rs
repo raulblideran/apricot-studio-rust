@@ -9,6 +9,7 @@
 
 use egui::{Align, Color32, Key, Layout, RichText, Vec2};
 
+use crate::dnd;
 use crate::export::{self, Audio, Exporter, Format, Options, Quality};
 use crate::media::{self, fmt_tc, parse_tc, Loader, MediaInfo};
 use crate::paths;
@@ -272,11 +273,23 @@ pub struct App {
     stop_at_out: bool,
     resume_after_scrub: bool,
     first_frame: bool,
+    /// Where the decoded frame was drawn this frame, so the scanline overlay
+    /// can leave it alone. `None` when there is nothing to show.
+    video_rect: Option<egui::Rect>,
+    /// Files dropped on the window, on the one platform where the toolkit does
+    /// not report them. `None` everywhere else, and in the test suite, which
+    /// has no window to drop anything on.
+    drops: Option<dnd::Drops>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<String>) -> Self {
-        Self::with_context(&cc.egui_ctx, path)
+        let mut app = Self::with_context(&cc.egui_ctx, path);
+        // Here rather than in `with_context`, which the test suite calls: this
+        // registers a process-wide sink on the clipboard thread, and a window
+        // that was never opened has nothing to drop a file on.
+        app.drops = dnd::watch(&cc.egui_ctx);
+        app
     }
 
     /// The window, built against a bare context.
@@ -332,6 +345,8 @@ impl App {
             stop_at_out: false,
             resume_after_scrub: false,
             first_frame: true,
+            video_rect: None,
+            drops: None,
         };
 
         // Everything this app does is a call to ffmpeg, so say so once at
@@ -378,6 +393,12 @@ impl App {
 
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    /// Where the picture was drawn on the last frame, which is the rectangle
+    /// the scanline overlay is told to leave alone.
+    pub fn video_rect(&self) -> Option<egui::Rect> {
+        self.video_rect
     }
 
     pub fn theme_key(&self) -> &'static str {
@@ -1100,7 +1121,10 @@ impl App {
     }
 
     fn handle_dropped(&mut self, ctx: &egui::Context) {
-        let dropped: Vec<String> = ctx.input(|i| {
+        // Two routes, never both at once: egui's list is what winit reports on
+        // X11, Windows and macOS, and [`dnd`] is what fills the silence on
+        // Wayland, where winit reports nothing at all.
+        let mut dropped: Vec<String> = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
@@ -1108,10 +1132,36 @@ impl App {
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect()
         });
-        if let Some(path) = dropped.iter().find(|path| platform::is_video(path)) {
-            let path = path.clone();
-            self.load(ctx, &path);
+        if let Some(drops) = &self.drops {
+            dropped.extend(drops.drain());
         }
+        // Read first and discarded second, deliberately. Swapping the file out
+        // from under a "delete the original?" dialog would be answering it for
+        // a file that is no longer open -- and holding the drop until the
+        // dialog is answered would open it minutes later, out of nowhere.
+        if dropped.is_empty() || self.dialog.is_some() {
+            return;
+        }
+        match dropped.iter().find(|path| platform::is_video(path)) {
+            Some(path) => {
+                let path = path.clone();
+                self.load(ctx, &path);
+            }
+            // Saying nothing here looks exactly like a drop that never
+            // arrived, which is the failure [`dnd`] exists to end.
+            None => {
+                self.status = format!(
+                    "{} is not a video Apricot Studio can open.",
+                    paths::basename(&dropped[0])
+                );
+            }
+        }
+    }
+
+    /// Whether a file is being held over the window right now.
+    fn drag_hovering(&self, ctx: &egui::Context) -> bool {
+        self.drops.as_ref().is_some_and(dnd::Drops::hovering)
+            || ctx.input(|i| !i.raw.hovered_files.is_empty())
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -1395,6 +1445,7 @@ impl App {
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click());
         ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
+        self.video_rect = None;
 
         match self.player.texture() {
             Some(texture) => {
@@ -1411,17 +1462,37 @@ impl App {
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                     Color32::WHITE,
                 );
+                self.video_rect = Some(frame);
             }
             None if !self.loaded() => {
                 let look = self.look.clone();
+                let hovering = self.drag_hovering(ui.ctx());
+                let (label, ink) = if hovering {
+                    ("Drop to open", theme::c32(&self.look.accent))
+                } else {
+                    (
+                        "Open a video, or drop one here",
+                        theme::c32(self.theme.text_dim),
+                    )
+                };
                 chrome::centred_text(
                     ui.painter(),
                     &look,
                     rect,
-                    "Open a video, or drop one here",
-                    theme::c32(self.theme.text_dim),
+                    label,
+                    ink,
                     theme::base_size(self.theme),
                 );
+                // The picture is the drop target, so it is the picture that has
+                // to look like one while a file is over it.
+                if hovering {
+                    ui.painter().rect_stroke(
+                        rect.shrink(6.0),
+                        self.theme.radius,
+                        egui::Stroke::new(1.0, theme::c32(&self.look.accent)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
             }
             None => {}
         }
@@ -1855,8 +1926,8 @@ impl App {
             .show(ui, |ui| self.video(ui));
 
         // Over everything, and after everything, so no control can be drawn on
-        // top of the lines.
-        chrome::scanlines(ctx, &self.look);
+        // top of the lines -- except the picture, which the overlay skips.
+        chrome::scanlines(ctx, &self.look, self.video_rect);
         self.handle_dialog(ctx);
 
         // Come back the size the window was left at. Written while running

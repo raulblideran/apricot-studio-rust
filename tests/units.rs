@@ -444,11 +444,33 @@ fn the_escapes_come_back_out() {
     // ended the URI early had it not been escaped in the first place.
     let dropped = platform::paths_from_uri_list("file:///tmp/my%20clip%20%232.mp4");
     assert_eq!(dropped, ["/tmp/my clip #2.mp4"]);
+
+    // One escape per *byte*, so a name outside ASCII arrives as several of
+    // them per character and only reads back once they are reassembled.
     assert_eq!(
-        platform::paths_from_uri_list(&platform::file_uri("/tmp/Å ëñ – cut.mkv")),
-        ["/tmp/Å ëñ – cut.mkv"],
-        "a round trip through the encoder survives"
+        platform::paths_from_uri_list("file:///tmp/%C3%85%20%C3%AB%C3%B1%20%E2%80%93%20cut.mkv"),
+        ["/tmp/Å ëñ – cut.mkv"]
     );
+}
+
+#[test]
+fn a_uri_survives_the_round_trip_through_the_encoder() {
+    // Built from the working directory rather than written out, because
+    // "/tmp/x" is an absolute path on one of the three platforms this runs on
+    // and a relative one on Windows, where paths::absolute would helpfully
+    // resolve it against the current drive and the two ends would disagree
+    // about a file neither of them is wrong about.
+    let original = std::env::current_dir()
+        .expect("a working directory")
+        .join("Å ëñ – cut.mkv")
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let round_tripped = platform::paths_from_uri_list(&platform::file_uri(&original));
+    assert_eq!(round_tripped.len(), 1, "{round_tripped:?}");
+    // Separators normalised on the way in and out: Windows spells them the
+    // other way round, and file_uri does not promise to spell them back.
+    assert_eq!(round_tripped[0].replace('\\', "/"), original);
 }
 
 #[test]

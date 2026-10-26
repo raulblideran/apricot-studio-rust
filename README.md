@@ -17,7 +17,7 @@ Download `apricot-studio-<version>.flatpak` from the
 [latest release](https://github.com/raulblideran/apricot-studio-rust/releases), then:
 
 ```sh
-flatpak install --user apricot-studio-1.1.0.flatpak
+flatpak install --user apricot-studio-1.2.0.flatpak
 ```
 
 Nothing else needed — the bundle carries its own ffmpeg built with libx264 and

@@ -41,6 +41,17 @@ const STEPS: [f64; 16] = [
     3600.0,
 ];
 
+/// Whether a pointer at `x` is close enough to grab one of the two handles.
+///
+/// One predicate for two things: it is what turns the cursor into the resize
+/// arrow, and it is what holds the hover preview back. They have to agree --
+/// a thumbnail that pops up over the handle you are reaching for hides the
+/// thing you are reaching for, and it appears exactly as you get close enough
+/// to grab it.
+pub fn over_handle(x: f32, x_in: f32, x_out: f32) -> bool {
+    (x - x_in).abs() <= GRAB_PX || (x - x_out).abs() <= GRAB_PX
+}
+
 fn short_tc(seconds: f64, fine: bool) -> String {
     let total = seconds as i64;
     let (h, rem) = (total / 3600, total % 3600);
@@ -375,15 +386,23 @@ impl Timeline {
         0.0
     }
 
+    /// Where the two handles are on screen this frame.
+    fn handle_xs(&self) -> (f32, f32) {
+        (self.x_of(self.in_point), self.x_of(self.out_point))
+    }
+
     fn hit(&self, x: f32) -> Option<Drag> {
-        let (x_in, x_out) = (self.x_of(self.in_point), self.x_of(self.out_point));
-        if (x - x_in).abs() <= GRAB_PX {
-            return Some(Drag::In);
+        let (x_in, x_out) = self.handle_xs();
+        if !over_handle(x, x_in, x_out) {
+            return None;
         }
-        if (x - x_out).abs() <= GRAB_PX {
-            return Some(Drag::Out);
-        }
-        None
+        // Both are in reach at once only when the selection is a sliver, and
+        // there the in-point wins -- which is the order this always had.
+        Some(if (x - x_in).abs() <= GRAB_PX {
+            Drag::In
+        } else {
+            Drag::Out
+        })
     }
 
     /// Pull the in-point onto a nearby keyframe unless overridden.
@@ -610,7 +629,8 @@ impl Timeline {
 
         if self.drag.is_none() {
             if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-                if response.hovered() {
+                let (x_in, x_out) = self.handle_xs();
+                if response.hovered() && !over_handle(pos.x, x_in, x_out) {
                     self.paint_hover(&painter, look, palette, pos.x);
                 }
             }

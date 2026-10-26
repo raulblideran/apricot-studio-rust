@@ -21,10 +21,10 @@
 
 mod common;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use apricot_studio::app::{App, Pickers};
+use apricot_studio::app::{self, App, Pickers};
 use apricot_studio::settings::Settings;
 use apricot_studio::ui::chrome;
 use egui_kittest::kittest::Queryable;
@@ -129,6 +129,58 @@ impl Window {
         self.harness.key_press(key);
         self.harness.run_steps(STEPS);
     }
+
+    /// Press a button, keep it down for `frames` frames, then let go.
+    ///
+    /// kittest's own `click()` is a press immediately followed by a release, so
+    /// a hold has to be assembled from the events by hand. Each frame is a
+    /// quarter second of simulated time, which is what makes a handful of them
+    /// long enough for a repeat to start.
+    fn hold(&mut self, label: &str, frames: usize) {
+        self.hold_nth(label, 0, frames);
+    }
+
+    /// Where a character's glyph sits in the font atlas, under the theme now on
+    /// screen.
+    ///
+    /// Two characters drawn with the same atlas glyph share this slot, which is
+    /// how a missing one is told apart: it comes back drawn as epaint's
+    /// replacement box, in the same slot as every other character no face has.
+    fn atlas_slot(&self, font: &egui::FontId, c: char) -> ([u16; 2], [u16; 2]) {
+        let galley = self.harness.ctx.fonts_mut(|fonts| {
+            fonts.layout_no_wrap(c.to_string(), font.clone(), egui::Color32::WHITE)
+        });
+        galley
+            .rows
+            .first()
+            .and_then(|placed| placed.row.glyphs.first())
+            .map(|glyph| (glyph.uv_rect.min, glyph.uv_rect.max))
+            .unwrap_or_else(|| panic!("{c:?} laid out to nothing"))
+    }
+
+    /// The same, for a label that more than one button answers to -- the bare
+    /// nudges beside the In and Out timecodes are the same two arrows twice.
+    fn hold_nth(&mut self, label: &str, index: usize, frames: usize) {
+        let at = self
+            .harness
+            .get_all_by_label(label)
+            .nth(index)
+            .unwrap_or_else(|| panic!("no {label} at index {index}"))
+            .rect()
+            .center();
+        let event = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let input = self.harness.input_mut();
+        input.events.push(egui::Event::PointerMoved(at));
+        input.events.push(event(true));
+        self.harness.run_steps(frames);
+        self.harness.input_mut().events.push(event(false));
+        self.harness.run_steps(STEPS);
+    }
 }
 
 fn loaded_window() -> Option<Window> {
@@ -160,7 +212,7 @@ fn the_controls_that_need_a_file_are_disabled_without_one() {
     // The buttons are still drawn -- an interface that loses half its controls
     // when nothing is open is harder to read, not easier.
     assert!(window.has("Export clip"));
-    assert!(window.has("▶  Play"));
+    assert!(window.has(app::PLAY));
     assert!(window.with(|app| app.badge_text().is_none()));
 }
 
@@ -252,12 +304,12 @@ fn every_button_in_the_window_can_be_clicked() {
         "Recent",
         "Theme",
         "Accent colour",
-        "▶  Play",
-        "⏮  Start",
-        "◀◀  10s",
-        "◀  1f",
-        "1f  ▶",
-        "10s  ▶▶",
+        app::PLAY,
+        app::START,
+        app::BACK_10S,
+        app::BACK_1F,
+        app::FWD_1F,
+        app::FWD_10S,
         "Set to playhead  (I)",
         "Snap",
         "Set to playhead  (O)",
@@ -285,14 +337,14 @@ fn the_transport_buttons_move_the_playhead() {
         return;
     };
     window.edit(|app| app.seek_to(3.0));
-    window.click("◀◀  10s");
+    window.click(app::BACK_10S);
     assert!(
         window.with(App::position) < 0.001,
         "10s back from 3s is the start"
     );
-    window.click("10s  ▶▶");
+    window.click(app::FWD_10S);
     assert!(window.with(App::position) > 5.0);
-    window.click("⏮  Start");
+    window.click(app::START);
     assert!(window.with(App::position) < 0.001);
 }
 
@@ -310,6 +362,183 @@ fn set_to_playhead_moves_the_marks() {
     window.click("Set to playhead  (O)");
     let (_, end) = window.with(App::selection);
     assert!((end - 4.0).abs() < 0.05, "out-point at {end}");
+}
+
+// ----- holding a step button ----------------------------------------------
+
+#[test]
+fn a_click_on_a_step_button_is_still_exactly_one_frame() {
+    let Some(mut window) = loaded_window() else {
+        return;
+    };
+    let frame = 1.0 / common::FPS as f64;
+    window.edit(|app| app.seek_to(1.0));
+
+    window.click(app::FWD_1F);
+    let moved = window.with(App::position) - 1.0;
+    assert!(
+        (moved - frame).abs() < frame / 2.0,
+        "a click moved {moved}s, not one {frame}s frame"
+    );
+}
+
+#[test]
+fn holding_a_step_button_keeps_stepping() {
+    let Some(mut window) = loaded_window() else {
+        return;
+    };
+    let frame = 1.0 / common::FPS as f64;
+    window.edit(|app| app.seek_to(1.0));
+
+    window.hold(app::FWD_1F, 8);
+    let moved = window.with(App::position) - 1.0;
+    assert!(
+        moved > frame * 2.0,
+        "held for two seconds and moved {moved}s -- one frame is {frame}s"
+    );
+
+    // And backwards, from wherever that left it.
+    let before = window.with(App::position);
+    window.hold(app::BACK_1F, 8);
+    let back = before - window.with(App::position);
+    assert!(back > frame * 2.0, "held back and moved {back}s");
+}
+
+#[test]
+fn holding_the_in_nudge_keeps_nudging() {
+    let Some(mut window) = loaded_window() else {
+        return;
+    };
+    let frame = 1.0 / common::FPS as f64;
+    window.edit(|app| app.set_in_point(1.0));
+
+    // The In pair comes first; the Out pair wears the same two arrows.
+    window.hold_nth(app::STEP_FWD, 0, 8);
+    let moved = window.with(App::selection).0 - 1.0;
+    assert!(
+        moved > frame * 2.0,
+        "the in-point moved {moved}s -- one frame is {frame}s"
+    );
+}
+
+// ----- the glyphs on the buttons ------------------------------------------
+
+#[test]
+fn every_glyph_on_a_button_is_in_the_fonts_this_binary_ships() {
+    // "❚❚  Pause" shipped as two empty boxes, because U+275A is in none of the
+    // four faces here. A missing glyph is not a slightly wrong symbol -- it is
+    // an empty box in the middle of the transport -- and the only way to know
+    // is to ask the fonts what they would actually draw.
+    //
+    // egui's own `has_glyph` cannot answer this: it reports which face a
+    // character resolved to, and calls anything landing on the family's
+    // replacement face missing -- which is every emoji glyph in these labels,
+    // present or not. So the question is put the way it is asked on screen:
+    // lay the character out, and see whether it came back as the box.
+    let mut window = Window::open(None);
+    for theme in apricot_studio::theme::THEMES {
+        window.click("Theme");
+        window.click(theme.name);
+        let font = egui::FontId::new(
+            apricot_studio::theme::base_size(theme),
+            apricot_studio::theme::body_family(theme),
+        );
+
+        // U+0378 is permanently unassigned, so no face can ever have it:
+        // whatever this theme draws when it has nothing, it draws here. The two
+        // controls keep the check honest -- the character that caused the bug
+        // has to fail it, and an ordinary letter has to pass.
+        let tofu = window.atlas_slot(&font, '\u{0378}');
+        assert_eq!(
+            window.atlas_slot(&font, '❚'),
+            tofu,
+            "{}: U+275A is no longer read as missing, so this check proves nothing",
+            theme.name
+        );
+        assert_ne!(
+            window.atlas_slot(&font, 'P'),
+            tofu,
+            "{}: an ordinary letter reads as missing, so this check proves nothing",
+            theme.name
+        );
+
+        for label in app::GLYPH_LABELS {
+            for glyph in label.chars().filter(|c| !c.is_ascii()) {
+                assert_ne!(
+                    window.atlas_slot(&font, glyph),
+                    tofu,
+                    "{} draws {glyph:?} (U+{:04X}) in {label:?} as an empty box",
+                    theme.name,
+                    glyph as u32
+                );
+            }
+        }
+    }
+}
+
+// ----- clicking the picture -----------------------------------------------
+
+#[test]
+fn clicking_the_empty_picture_opens_a_file() {
+    // It says "Open a video, or drop one here" and it takes a dropped file, so
+    // a click on it that does nothing is a dead control. The click goes all the
+    // way to the chooser seam here rather than to a mock of the handler.
+    if !have_ffmpeg() {
+        return;
+    }
+    let clip = fixture("allp");
+    let mut window = Window::open(None);
+    assert!(!window.with(App::is_loaded));
+
+    let answer = clip.clone();
+    window.edit(move |app| {
+        app.set_pickers(Pickers {
+            open: Box::new(move |_| Some(answer.clone())),
+            save: Box::new(|_, _| None),
+        });
+    });
+    window.click(app::OPEN_PROMPT);
+    window.settle();
+
+    assert!(
+        window.with(App::is_loaded),
+        "the click never reached the chooser"
+    );
+    assert_eq!(
+        window.with(|app| app.source_path().map(str::to_string)),
+        Some(clip)
+    );
+}
+
+#[test]
+fn the_picture_still_toggles_playback_once_a_file_is_open() {
+    let Some(mut window) = loaded_window() else {
+        return;
+    };
+    let opened = Rc::new(Cell::new(false));
+    let flag = Rc::clone(&opened);
+    window.edit(move |app| {
+        app.set_pickers(Pickers {
+            open: Box::new(move |_| {
+                flag.set(true);
+                None
+            }),
+            save: Box::new(|_, _| None),
+        });
+    });
+
+    assert!(!window.with(App::is_playing));
+    window.click(app::PICTURE);
+    assert!(
+        window.with(App::is_playing),
+        "the picture should start playback"
+    );
+    window.click(app::PICTURE);
+    assert!(!window.with(App::is_playing));
+    assert!(
+        !opened.get(),
+        "the chooser opened over a file that was already loaded"
+    );
 }
 
 // ----- the keyboard -------------------------------------------------------

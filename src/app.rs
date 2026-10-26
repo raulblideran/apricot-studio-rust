@@ -30,6 +30,36 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Below this an "export" cannot be a real clip, and the original must be kept.
 pub const MIN_CLIP_BYTES: u64 = 1024;
 
+/// The button labels that carry a glyph, and the two names the picture answers
+/// to.
+///
+/// A typed glyph is a bet that every face this binary ships has it, and
+/// "❚❚  Pause" lost that bet: U+275A is in none of the four -- Ubuntu-Light,
+/// NotoEmoji, emoji-icon-font, Rajdhani -- so the button read as two empty
+/// boxes. U+23F8 below comes out of emoji-icon-font, the same face that already
+/// draws the ⏮ on Start. They are named here rather than typed at the call
+/// site so tests/window.rs can check every one of them against the real fonts.
+pub const PLAY: &str = "▶  Play";
+pub const PAUSE: &str = "⏸  Pause";
+pub const START: &str = "⏮  Start";
+pub const BACK_10S: &str = "◀◀  10s";
+pub const BACK_1F: &str = "◀  1f";
+pub const FWD_1F: &str = "1f  ▶";
+pub const FWD_10S: &str = "10s  ▶▶";
+/// The bare nudges beside the In and Out timecodes.
+pub const STEP_BACK: &str = "◀";
+pub const STEP_FWD: &str = "▶";
+
+/// Every label above, for the test that checks each glyph resolves.
+pub const GLYPH_LABELS: &[&str] = &[
+    PLAY, PAUSE, START, BACK_10S, BACK_1F, FWD_1F, FWD_10S, STEP_BACK, STEP_FWD,
+];
+
+/// What the empty picture says, and the name its click answers to.
+pub const OPEN_PROMPT: &str = "Open a video, or drop one here";
+/// What the picture is once there is something on it.
+pub const PICTURE: &str = "Play/pause";
+
 /// What the export may be, described by intent rather than by numbers. The
 /// presets scale against the source's own bitrate, so "smaller" means smaller
 /// than this file.
@@ -1442,10 +1472,22 @@ impl App {
     }
 
     fn video(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let rect = ui.available_rect_before_wrap();
         let response = ui.allocate_rect(rect, egui::Sense::click());
         ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
         self.video_rect = None;
+        let loaded = self.loaded();
+
+        // The largest control in the window, and until now it had no
+        // accessible name at all -- which is also why no test could reach it.
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                true,
+                if loaded { PICTURE } else { OPEN_PROMPT },
+            )
+        });
 
         match self.player.texture() {
             Some(texture) => {
@@ -1464,16 +1506,13 @@ impl App {
                 );
                 self.video_rect = Some(frame);
             }
-            None if !self.loaded() => {
+            None if !loaded => {
                 let look = self.look.clone();
-                let hovering = self.drag_hovering(ui.ctx());
+                let hovering = self.drag_hovering(&ctx);
                 let (label, ink) = if hovering {
                     ("Drop to open", theme::c32(&self.look.accent))
                 } else {
-                    (
-                        "Open a video, or drop one here",
-                        theme::c32(self.theme.text_dim),
-                    )
+                    (OPEN_PROMPT, theme::c32(self.theme.text_dim))
                 };
                 chrome::centred_text(
                     ui.painter(),
@@ -1497,10 +1536,20 @@ impl App {
             None => {}
         }
 
-        // The picture is the one surface with nothing else to do with a click,
-        // and every video player treats it as play/pause.
+        // The picture is the one surface with nothing else to do with a click.
+        // With a file open, every video player treats it as play/pause. With
+        // none, it is the biggest "open a video" target in the window -- it
+        // says so, and it takes a dropped file -- so a click on it opening the
+        // chooser is the only reading that is not a dead control.
+        if !loaded && response.hovered() {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
         if response.clicked() {
-            self.toggle_play();
+            if loaded {
+                self.toggle_play();
+            } else {
+                self.open_dialog(&ctx, None);
+            }
         }
     }
 
@@ -1509,11 +1558,7 @@ impl App {
         let loaded = self.loaded();
         ui.horizontal(|ui| {
             let playing = self.player.playing();
-            let label = if playing {
-                "❚❚  Pause"
-            } else {
-                "▶  Play"
-            };
+            let label = if playing { PAUSE } else { PLAY };
             if chrome::button(ui, &look, label, Kind::Normal, loaded)
                 .on_hover_text("Space")
                 .clicked()
@@ -1530,31 +1575,32 @@ impl App {
                 .color(theme::c32(self.theme.text)),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if chrome::button(ui, &look, "10s  ▶▶", Kind::Normal, loaded)
+                if chrome::button(ui, &look, FWD_10S, Kind::Normal, loaded)
                     .on_hover_text("L")
                     .clicked()
                 {
                     self.nudge(10.0);
                 }
-                if chrome::button(ui, &look, "1f  ▶", Kind::Step, loaded)
-                    .on_hover_text("Right arrow")
-                    .clicked()
-                {
+                // The two frame steps repeat while held: moving ten frames was
+                // ten clicks. Everything else here is a jump, and a jump that
+                // repeats is a way to lose your place.
+                let forward = chrome::button(ui, &look, FWD_1F, Kind::Step, loaded)
+                    .on_hover_text("Right arrow  ·  hold to keep stepping");
+                for _ in 0..chrome::presses(ui, &forward) {
                     self.step(1.0);
                 }
-                if chrome::button(ui, &look, "◀  1f", Kind::Step, loaded)
-                    .on_hover_text("Left arrow")
-                    .clicked()
-                {
+                let back = chrome::button(ui, &look, BACK_1F, Kind::Step, loaded)
+                    .on_hover_text("Left arrow  ·  hold to keep stepping");
+                for _ in 0..chrome::presses(ui, &back) {
                     self.step(-1.0);
                 }
-                if chrome::button(ui, &look, "◀◀  10s", Kind::Normal, loaded)
+                if chrome::button(ui, &look, BACK_10S, Kind::Normal, loaded)
                     .on_hover_text("J")
                     .clicked()
                 {
                     self.nudge(-10.0);
                 }
-                if chrome::button(ui, &look, "⏮  Start", Kind::Normal, loaded)
+                if chrome::button(ui, &look, START, Kind::Normal, loaded)
                     .on_hover_text("Home")
                     .clicked()
                 {
@@ -1579,16 +1625,14 @@ impl App {
             if response.lost_focus() {
                 self.commit_in_text();
             }
-            if chrome::button(ui, &look, "◀", Kind::Step, loaded)
-                .on_hover_text("Back one frame")
-                .clicked()
-            {
+            let back = chrome::button(ui, &look, STEP_BACK, Kind::Step, loaded)
+                .on_hover_text("Back one frame  ·  hold to keep going");
+            for _ in 0..chrome::presses(ui, &back) {
                 self.bump_in(-1.0);
             }
-            if chrome::button(ui, &look, "▶", Kind::Step, loaded)
-                .on_hover_text("Forward one frame")
-                .clicked()
-            {
+            let forward = chrome::button(ui, &look, STEP_FWD, Kind::Step, loaded)
+                .on_hover_text("Forward one frame  ·  hold to keep going");
+            for _ in 0..chrome::presses(ui, &forward) {
                 self.bump_in(1.0);
             }
             if chrome::button(ui, &look, "Set to playhead  (I)", Kind::Normal, loaded).clicked() {
@@ -1616,16 +1660,14 @@ impl App {
             if response.lost_focus() {
                 self.commit_out_text();
             }
-            if chrome::button(ui, &look, "◀", Kind::Step, loaded)
-                .on_hover_text("Back one frame")
-                .clicked()
-            {
+            let back = chrome::button(ui, &look, STEP_BACK, Kind::Step, loaded)
+                .on_hover_text("Back one frame  ·  hold to keep going");
+            for _ in 0..chrome::presses(ui, &back) {
                 self.bump_out(-1.0);
             }
-            if chrome::button(ui, &look, "▶", Kind::Step, loaded)
-                .on_hover_text("Forward one frame")
-                .clicked()
-            {
+            let forward = chrome::button(ui, &look, STEP_FWD, Kind::Step, loaded)
+                .on_hover_text("Forward one frame  ·  hold to keep going");
+            for _ in 0..chrome::presses(ui, &forward) {
                 self.bump_out(1.0);
             }
             if chrome::button(ui, &look, "Set to playhead  (O)", Kind::Normal, loaded).clicked() {

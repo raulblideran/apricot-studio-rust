@@ -34,6 +34,11 @@ dist/
 *.exe
 *.app/
 
+# What gets uploaded to a release, one folder per version, every platform side
+# by side with a SHA256SUMS. The release page is where these live; this is the
+# local copy they were uploaded from.
+/releases/
+
 # ---- Editors and IDEs ----------------------------------------------------
 .vscode/
 .idea/

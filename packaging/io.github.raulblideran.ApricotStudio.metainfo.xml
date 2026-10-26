@@ -75,6 +75,20 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.2.0" date="2026-08-26">
+      <description>
+        <p>
+          Four things reported from real use: two repairs to the transport, one
+          to the timeline, and a click that used to do nothing.
+        </p>
+        <ul>
+          <li>The Pause button reads "Pause" again — its symbol was a character none of the bundled typefaces contained, so it drew as two empty boxes</li>
+          <li>Hold either one-frame button, beside the playhead or beside the In and Out timecodes, and it keeps stepping</li>
+          <li>The timeline's hover preview steps aside near the in and out handles, instead of covering the handle you are reaching for</li>
+          <li>Clicking the empty picture opens a video, the same as the Open button — it already said so, and already took a dropped file</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-08-24">
       <description>
         <p>

@@ -1,6 +1,6 @@
 [package]
 name = "apricot-studio"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 rust-version = "1.85"
 description = "A small video trimmer: open a file, mark in and out, export the clip"

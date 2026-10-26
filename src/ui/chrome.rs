@@ -32,6 +32,14 @@ pub const GLITCH_SECONDS: f64 = 0.190;
 /// Seconds between redraws while it does.
 pub const GLITCH_TICK: f64 = 0.024;
 
+/// How long a step button is held before it starts repeating.
+///
+/// Comfortably longer than a deliberate click, and longer than one frame of the
+/// test harness's simulated clock, so a click stays exactly one step.
+pub const REPEAT_DELAY: f64 = 0.4;
+/// Seconds between repeats once it has.
+pub const REPEAT_INTERVAL: f64 = 0.05;
+
 /// Room a menu button leaves for its painted caret.
 const CARET_W: f32 = 14.0;
 
@@ -212,10 +220,18 @@ pub fn button(ui: &mut Ui, look: &Look, text: &str, kind: Kind, enabled: bool) -
         )
     };
 
-    let sense = if enabled {
-        Sense::click()
-    } else {
+    let sense = if !enabled {
         Sense::hover()
+    } else if kind == Kind::Step {
+        // Click *and* drag, for the four buttons that repeat while held.
+        // egui stops treating a press as a potential click after 0.6s, and with
+        // nothing else holding the press open `is_pointer_button_down_on` goes
+        // false halfway through a hold -- exactly when the button should be
+        // repeating. A drag sense keeps the press on the widget until it is
+        // released. See [`presses`].
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
     };
     let (rect, response) = ui.allocate_exact_size(size, sense);
     // These are painted rather than built out of egui's own button, so nothing
@@ -401,6 +417,71 @@ fn glitch_offset(ui: &Ui, look: &Look, response: &Response, enabled: bool) -> Op
         }
         None
     }
+}
+
+/// What a held button remembers between frames.
+#[derive(Clone, Copy)]
+struct Held {
+    /// When the press started.
+    since: f64,
+    /// When it last acted.
+    last: f64,
+    /// Whether the hold has fired at all, so the click on release can be
+    /// swallowed rather than counted twice.
+    fired: bool,
+}
+
+/// Whether a button held for `held_for` seconds, which last acted `since_last`
+/// seconds ago, should act again now.
+///
+/// Pure, so how a held button feels is a test rather than a stopwatch.
+pub fn repeat_due(held_for: f64, since_last: f64) -> bool {
+    held_for >= REPEAT_DELAY && since_last >= REPEAT_INTERVAL
+}
+
+/// How many times a button should act this frame.
+///
+/// A click is one, exactly as `clicked()` alone was. Holding it is one on
+/// release as before, and a stream of them once [`REPEAT_DELAY`] has passed --
+/// which is what turns ten clicks on a frame step into holding the button down.
+///
+/// The countdown lives in egui's own per-widget memory, the same place
+/// [`glitch_offset`] keeps its own, so a button rebuilt every frame still
+/// remembers when it was pressed.
+pub fn presses(ui: &Ui, response: &Response) -> u32 {
+    let id = response.id.with("repeat");
+    let now = ui.input(|i| i.time);
+    let held: Option<Held> = ui.data(|d| d.get_temp(id));
+
+    if response.is_pointer_button_down_on() {
+        let mut state = held.unwrap_or(Held {
+            since: now,
+            last: now,
+            fired: false,
+        });
+        // At most one per frame. Firing once per missed interval to catch up
+        // would turn a single stutter into a twenty-frame jump.
+        let due = repeat_due(now - state.since, now - state.last);
+        if due {
+            state.last = now;
+            state.fired = true;
+        }
+        ui.data_mut(|d| d.insert_temp(id, state));
+        // Without this the repeats stop the moment the pointer stops moving,
+        // which is the whole of the gesture.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(REPEAT_INTERVAL));
+        return u32::from(due);
+    }
+
+    if held.is_some() {
+        ui.data_mut(|d| d.remove::<Held>(id));
+    }
+    // A hold that already fired has had its steps; letting the release add one
+    // more would leave the playhead a frame past where the button was let go.
+    // (egui reaches the same conclusion by itself for a hold longer than its
+    // click window, and this covers the shorter ones.)
+    u32::from(response.clicked() && !held.is_some_and(|state| state.fired))
 }
 
 /// The overlay's line segments, with `clear` cut out of them.

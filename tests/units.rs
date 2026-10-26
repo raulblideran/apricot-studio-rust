@@ -14,7 +14,7 @@ use apricot_studio::export::{self, Audio, Format, Options, Quality};
 use apricot_studio::media::{self, AudioTrack};
 use apricot_studio::paths;
 use apricot_studio::platform;
-use apricot_studio::ui::chrome;
+use apricot_studio::ui::{chrome, timeline};
 use common::sample_info;
 
 // ----- timecode -----------------------------------------------------------
@@ -317,6 +317,73 @@ fn a_zero_cut_is_an_ordinary_rectangle() {
     let shape = chrome::chamfer_polygon(50.0, 20.0, 0.0);
     assert!(shape.iter().any(|p| p.x == 0.0 && p.y == 0.0));
     assert!(shape.iter().any(|p| p.x == 50.0 && p.y == 20.0));
+}
+
+// ----- holding a step button ----------------------------------------------
+
+#[test]
+fn a_short_hold_does_not_repeat() {
+    // A press held for less than the delay is a click, not a gesture -- the
+    // step it earns is the one `clicked()` gives on release.
+    assert!(!chrome::repeat_due(0.0, 0.0));
+    assert!(!chrome::repeat_due(chrome::REPEAT_DELAY - 0.01, 10.0));
+}
+
+#[test]
+fn past_the_delay_it_repeats_at_the_interval() {
+    assert!(chrome::repeat_due(
+        chrome::REPEAT_DELAY,
+        chrome::REPEAT_INTERVAL
+    ));
+    // Held long enough, but it acted a moment ago: not yet.
+    assert!(!chrome::repeat_due(2.0, chrome::REPEAT_INTERVAL - 0.001));
+    assert!(chrome::repeat_due(2.0, chrome::REPEAT_INTERVAL));
+}
+
+#[test]
+fn the_delay_outlasts_a_simulated_click() {
+    // egui_kittest advances a quarter second per frame, and a click there is a
+    // press frame and a release frame. If the delay were shorter than that,
+    // every click in the window suite would count as two steps.
+    const {
+        assert!(
+            chrome::REPEAT_DELAY > 0.25,
+            "a simulated click would repeat"
+        )
+    };
+}
+
+// ----- the timeline handles -----------------------------------------------
+
+#[test]
+fn the_pointer_is_on_a_handle_within_reach_of_one() {
+    // 100 and 400 are where the in and out handles are drawn.
+    assert!(timeline::over_handle(100.0, 100.0, 400.0));
+    assert!(timeline::over_handle(400.0, 100.0, 400.0));
+    assert!(timeline::over_handle(
+        100.0 + timeline::GRAB_PX,
+        100.0,
+        400.0
+    ));
+    assert!(timeline::over_handle(
+        400.0 - timeline::GRAB_PX,
+        100.0,
+        400.0
+    ));
+}
+
+#[test]
+fn the_pointer_is_not_on_a_handle_anywhere_else() {
+    // A pixel past the grab distance is filmstrip, and the hover preview
+    // belongs there: it is only over the handles that it hides what you are
+    // reaching for.
+    assert!(!timeline::over_handle(
+        100.0 + timeline::GRAB_PX + 1.0,
+        100.0,
+        400.0
+    ));
+    assert!(!timeline::over_handle(250.0, 100.0, 400.0));
+    assert!(!timeline::over_handle(0.0, 100.0, 400.0));
 }
 
 // ----- deleting the original ---------------------------------------------

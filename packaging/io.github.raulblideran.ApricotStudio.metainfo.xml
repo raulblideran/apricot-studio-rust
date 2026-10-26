@@ -75,6 +75,14 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="1.2.1" date="2026-10-26">
+      <description>
+        <p>
+          No change to the app. The first release built entirely by CI: Windows
+          ships as one zip, with ffmpeg and ffprobe beside the program.
+        </p>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-08-26">
       <description>
         <p>

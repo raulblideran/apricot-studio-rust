@@ -3,8 +3,8 @@
 #   git tag -a v1.3.0 -m "Apricot Studio 1.3.0" -m "<what changed>"
 #   git push origin v1.3.0
 #
-# Everything is built here from a clean checkout of the tag: the Windows zip
-# with ffmpeg beside the .exe, the bare .exe, and the Flatpak. The release
+# Everything is built here from a clean checkout of the tag: the Windows zip,
+# with ffmpeg beside the .exe, and the Flatpak. The release
 # notes are the tag's own message, followed by a table of what to download, so
 # writing the tag is writing the release.
 #
@@ -75,14 +75,11 @@ jobs:
           }
 
           Compress-Archive -Path "out\$env:NAME" -DestinationPath "out\$env:NAME.zip"
-          Copy-Item target\release\apricot-studio.exe "out\$env:NAME.exe"
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: |
-            out/*.zip
-            out/*.exe
+          path: out/*.zip
 
   flatpak:
     name: flatpak
@@ -138,7 +135,6 @@ jobs:
           |---|---|
           | \`apricot-studio-$VERSION.flatpak\` | **Linux.** \`flatpak install --user apricot-studio-$VERSION.flatpak\`. Carries its own ffmpeg with libx264 and libx265. |
           | \`apricot-studio-$VERSION-windows-x64.zip\` | **Windows 10/11.** Unzip and run \`apricot-studio.exe\`. ffmpeg and ffprobe are included beside it. |
-          | \`apricot-studio-$VERSION-windows-x64.exe\` | The Windows app on its own, for anyone who already has ffmpeg on \`PATH\` (\`winget install Gyan.FFmpeg\`). |
           | \`SHA256SUMS\` | Checksums for all of the above. |
 
           The Windows build is not signed, so SmartScreen asks before the first run ("More info" → "Run anyway").

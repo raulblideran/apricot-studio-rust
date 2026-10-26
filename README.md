@@ -4,8 +4,8 @@ A small video trimmer. Open a file, mark in and out, export the clip.
 The export inherits every setting from the source, so there is nothing to configure.
 
 Built for pulling a highlight out of a gpu-screen-recorder replay buffer without
-opening kdenlive or DaVinci. Packaged for Linux as a Flatpak; it builds and runs
-on Windows and macOS too, though neither is released yet.
+opening kdenlive or DaVinci. Released for Linux as a Flatpak and for Windows as
+a zip; it builds and runs on macOS too, though that is not released yet.
 
 <img src="packaging/io.github.raulblideran.ApricotStudio.svg" width="96" alt="Apricot Studio">
 
@@ -51,11 +51,21 @@ manifest builds with `--share=network` so cargo can fetch its crates, which is
 fine locally and not allowed on Flathub — `packaging/flatpak/generate-cargo-sources.sh`
 writes the offline crate list that replaces it.
 
-### Windows and macOS
+### Windows
 
-The code builds and its tests pass on both — CI compiles it on `windows-latest`
-and `macos-latest` on every push — but neither is packaged or released yet, so
-there is no `.exe` and no `.app` to download.
+Download `apricot-studio-<version>-windows-x64.zip` from the
+[latest release](https://github.com/raulblideran/apricot-studio-rust/releases),
+unzip it anywhere, and run `apricot-studio.exe`. ffmpeg and ffprobe are in the
+zip beside it. The build is not signed, so SmartScreen asks before the first
+run: "More info", then "Run anyway".
+
+### macOS
+
+The code builds and its tests pass — CI compiles it on `macos-latest` on every
+push — but it is not packaged or released yet, so there is no `.app` to
+download.
+
+### Building on Windows or macOS
 
 From a checkout, `cargo build --release` produces a working binary on either.
 The app looks for `ffmpeg` and `ffprobe` beside its own executable before

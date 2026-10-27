@@ -1,0 +1,130 @@
+# The suite, on every branch push and pull request, and a build on each
+# platform the app claims to run on.
+#
+# Branch pushes and pull requests only: a release pushes main and its tag
+# together, and the tag's commit is the one main was just tested at. Changes
+# that cannot affect the app (docs, the release and cache workflows) do not
+# need a run.
+#
+# The Linux job runs the whole thing including the real encodes: the tests that
+# catch the defects this project actually shipped are the ones that invoke
+# ffmpeg, so a CI run that skipped them would be reassurance without cover.
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/flatpak-cache.yml"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/flatpak-cache.yml"
+  workflow_dispatch:
+
+# A newer push to the same branch makes an unfinished run of the older one
+# pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Time limits a few times the usual run, so a hung step fails fast instead of
+  # after 6 hours.
+  linux:
+    name: Tests · Linux (everything, with ffmpeg)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Skipping recommends and the man-db index rebuild keeps the install
+      # quick. The mirror has stalled mid-download before: a 30 s stall aborts
+      # that download and retries it.
+      - name: Install ffmpeg, the window libraries and the packaging validators
+        run: |
+          sudo rm -f /var/lib/man-db/auto-update
+          APT=(-o Acquire::Retries=5 -o Acquire::http::Timeout=30)
+          sudo apt-get "${APT[@]}" update
+          sudo apt-get "${APT[@]}" install -y --no-install-recommends \
+            ffmpeg \
+            libasound2-dev libudev-dev \
+            libxkbcommon-x11-0 libgl1 libegl1 \
+            desktop-file-utils appstream
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Lints
+        run: cargo clippy --all-targets -- -D warnings
+
+      # No display on a runner, and none needed: the window tests drive real
+      # frames through egui_kittest without opening one.
+      - name: Run the suite
+        run: ./build/test.sh
+
+      - name: Validate the desktop entry
+        run: desktop-file-validate packaging/io.github.raulblideran.ApricotStudio.desktop
+
+      # --no-net because the default run fetches every <url> in the file to see
+      # whether it resolves. That turns a GitHub hiccup into a red build and
+      # tests the internet rather than the document.
+      - name: Validate the metainfo
+        run: appstreamcli validate --no-net packaging/io.github.raulblideran.ApricotStudio.metainfo.xml
+
+  # Tests only: the Windows zip itself is built by the Release workflow. The
+  # parts that need no ffmpeg or window run everywhere, and they are where the
+  # export rules, the codec download and the theme measurements live.
+  windows:
+    name: Tests · Windows (no ffmpeg)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Test what runs without ffmpeg
+        run: cargo test --test units --test commands --test theme
+
+  macos:
+    name: Tests · macOS (no ffmpeg)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Test what runs without ffmpeg
+        run: cargo test --test units --test commands --test theme
+
+  # On demand only: downloads the real codecs into a scratch Codex folder,
+  # checks every file against its pinned checksum, and runs a QTGMC export on
+  # an interlaced clip. Worth one run before a release that touches codex.rs.
+  codex:
+    name: Codex download · Windows (on demand)
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Download into a scratch Codex and export with QTGMC
+        run: cargo test --test units codex_download -- --ignored --nocapture

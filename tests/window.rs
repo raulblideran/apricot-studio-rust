@@ -25,6 +25,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use apricot_studio::app::{self, App, Pickers};
+use apricot_studio::deinterlace::{Method, Parity, Scan};
 use apricot_studio::settings::Settings;
 use apricot_studio::ui::chrome;
 use egui_kittest::kittest::Queryable;
@@ -900,4 +901,90 @@ fn an_export_runs_and_reports_what_it_wrote() {
     let clip = dir.path().join("exported.mp4");
     assert!(clip.exists(), "the clip was not written");
     assert!(std::fs::metadata(&clip).unwrap().len() > 1024);
+}
+
+// ----- interlaced sources -------------------------------------------------
+
+/// Open a fixture and wait for the scan check as well as the keyframes.
+fn window_on(kind: &str) -> Option<Window> {
+    if !have_ffmpeg() {
+        return None;
+    }
+    let mut window = Window::open(Some(fixture(kind)));
+    window.settle();
+    for _ in 0..40 {
+        if window.with(|app| app.scan().is_some()) {
+            break;
+        }
+        window.harness.run_steps(STEPS);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    window.harness.run_steps(STEPS);
+    Some(window)
+}
+
+#[test]
+fn the_deinterlacer_is_only_offered_for_an_interlaced_file() {
+    let Some(progressive) = window_on("allp") else {
+        return;
+    };
+    assert_eq!(progressive.with(App::scan), Some(Scan::Progressive));
+    assert!(!progressive.has(app::DEINTERLACE));
+
+    let Some(interlaced) = window_on("interlaced") else {
+        return;
+    };
+    assert_eq!(
+        interlaced.with(App::scan),
+        Some(Scan::Interlaced(Parity::Tff))
+    );
+    assert!(interlaced.has(app::DEINTERLACE));
+    // Off until asked for, and the badge says why it is there at all.
+    assert_eq!(interlaced.with(App::deinterlacer), None);
+    let badge = interlaced.with(App::badge_text).unwrap_or_default();
+    assert!(badge.starts_with("Lossless copy"), "{badge}");
+    assert!(badge.contains("interlaced"), "{badge}");
+}
+
+#[test]
+fn choosing_bwdif_from_the_menu_starts_at_slowest_and_re_encodes() {
+    let Some(mut window) = window_on("interlaced") else {
+        return;
+    };
+    window.click(app::DEINTERLACE);
+    window.click("BWDIF");
+    assert_eq!(window.with(App::deinterlacer), Some(Method::BWDIF));
+    // The menu's title says what is chosen, and reopening it shows the
+    // profile, at its default.
+    window.click("Deinterlace · BWDIF");
+    assert!(window.has("Slowest"), "the profile list shows its default");
+    window.press(egui::Key::Escape);
+    let badge = window.with(App::badge_text).unwrap_or_default();
+    assert!(badge.starts_with("Re-encode"), "{badge}");
+    assert!(badge.contains("BWDIF"), "{badge}");
+    assert!(!badge.contains("interlaced"), "{badge}");
+
+    // Back to Off, and a cut from the start is a copy again.
+    window.edit(|app| app.set_deinterlacer(None));
+    let badge = window.with(App::badge_text).unwrap_or_default();
+    assert!(badge.starts_with("Lossless copy"), "{badge}");
+}
+
+#[test]
+fn a_new_file_forgets_the_last_ones_deinterlacer() {
+    let Some(mut window) = window_on("interlaced") else {
+        return;
+    };
+    window.edit(|app| app.set_deinterlacer(Some(Method::BWDIF)));
+    let clip = fixture("allp");
+    window.edit(|app| {
+        app.set_pickers(Pickers {
+            open: Box::new(move |_| Some(clip.clone())),
+            save: Box::new(|_, _| None),
+        })
+    });
+    window.click("Open…");
+    window.settle();
+    assert!(window.with(|app| app.source_path().is_some_and(|p| p.ends_with("allp.mp4"))));
+    assert_eq!(window.with(App::deinterlacer), None);
 }

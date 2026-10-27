@@ -23,10 +23,18 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::deinterlace::{self, Scan};
 use crate::ffmpeg::{command, ffmpeg_path, ffprobe_path};
 
 pub const THUMB_W: usize = 106;
 pub const THUMB_H: usize = 60;
+
+/// The most filmstrip frames a file ever gets, however long it is. Zoomed all
+/// the way out the strip shows a dozen; this leaves room to zoom in.
+pub const MAX_THUMBS: usize = 160;
+/// And no more than one per this many seconds, so a short clip is not asked
+/// for a frame it does not have.
+const THUMB_MIN_INTERVAL: f64 = 0.5;
 
 /// Bucket the waveform decode into roughly this many samples regardless of how
 /// long the file is, so a two-hour recording costs the same as a 90s clip.
@@ -270,6 +278,9 @@ pub struct MediaInfo {
     pub color_primaries: String,
     pub color_transfer: String,
     pub color_space: String,
+    /// ffprobe's word for the scan: `progressive`, `tt`, `bb`, `tb`, `bt`, or
+    /// empty/`unknown` when the stream does not say.
+    pub field_order: String,
 
     pub audio: Vec<AudioTrack>,
 }
@@ -558,6 +569,7 @@ pub fn parse_probe(path: &str, json: &str) -> Result<MediaInfo, String> {
         color_primaries: text(video.get("color_primaries")),
         color_transfer: text(video.get("color_transfer")),
         color_space: text(video.get("color_space")),
+        field_order: text(video.get("field_order")),
         audio,
     })
 }
@@ -627,6 +639,27 @@ impl<T: Send + 'static> Loader<T> {
         }
     }
 
+    /// A worker that starts its own processes, for a job that is many small
+    /// ones rather than one long one.
+    fn run<F>(ctx: egui::Context, work: F) -> Self
+    where
+        F: FnOnce(&Sender<T>, &Arc<AtomicBool>, &egui::Context) + Send + 'static,
+    {
+        let (tx, rx) = channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        thread::spawn(move || {
+            work(&tx, &flag, &ctx);
+            drop(tx);
+            ctx.request_repaint();
+        });
+        Self {
+            cancelled,
+            rx: Some(rx),
+            done: false,
+        }
+    }
+
     pub fn cancel(&mut self) {
         self.cancelled.store(true, Ordering::SeqCst);
         self.rx = None;
@@ -675,17 +708,20 @@ fn read_all(
     }
 }
 
-/// Keyframe timestamps. ~0.85s for a 90s 1440p60 file.
+/// Keyframe timestamps, read from packet flags.
+///
+/// Packets, not frames: asking for frames makes ffprobe decode each one it
+/// reports, and on an all-intra source (ProRes, DV, MJPEG) every frame is a
+/// keyframe, so that was the whole file decoded at full speed on every core.
+/// The packet headers already say which ones are keyframes.
 pub fn load_keyframes(path: &str, ctx: egui::Context) -> Loader<Vec<f64>> {
     let args = [
         "-v",
         "error",
         "-select_streams",
         "v:0",
-        "-skip_frame",
-        "nokey",
         "-show_entries",
-        "frame=pts_time",
+        "packet=pts_time,flags",
         "-of",
         "csv=p=0",
         path,
@@ -702,15 +738,25 @@ pub fn load_keyframes(path: &str, ctx: egui::Context) -> Loader<Vec<f64>> {
         if cancelled.load(Ordering::SeqCst) {
             return;
         }
-        let mut times: Vec<f64> = text
-            .lines()
-            .filter_map(|line| line.trim().trim_end_matches(',').parse::<f64>().ok())
-            .filter(|t| t.is_finite())
-            .collect();
-        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let _ = tx.send(times);
+        let _ = tx.send(keyframes_from_packets(&text));
         ctx.request_repaint();
     })
+}
+
+/// Keyframe times out of ffprobe's `pts_time,flags` packet lines, sorted.
+pub fn keyframes_from_packets(text: &str) -> Vec<f64> {
+    let mut times: Vec<f64> = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().split(',');
+            let time = fields.next()?.parse::<f64>().ok()?;
+            let flags = fields.next()?;
+            (flags.contains('K') && time.is_finite()).then_some(time)
+        })
+        .collect();
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    times.dedup();
+    times
 }
 
 /// Peak envelope of the audio, as `buckets` values in 0..1.
@@ -751,6 +797,54 @@ pub fn load_waveform(info: &MediaInfo, ctx: egui::Context) -> Loader<Vec<f32>> {
     })
 }
 
+/// Whether the source is interlaced, and which field comes first.
+///
+/// The container's own flag answers at once when it gives one. When it does
+/// not, ffmpeg's `idet` looks at a few hundred frames -- one core, a second or
+/// two -- and the answer arrives with the other loaders'.
+pub fn detect_scan(info: &MediaInfo, ctx: egui::Context) -> Loader<Scan> {
+    if let Some(scan) = deinterlace::scan_from_field_order(&info.field_order) {
+        let (tx, rx) = channel();
+        let _ = tx.send(scan);
+        return Loader {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            rx: Some(rx),
+            done: false,
+        };
+    }
+    let args = deinterlace::idet_args(&info.path, info.duration);
+    Loader::run(ctx, move |tx, cancelled, ctx| {
+        let Ok(mut child) = command(&ffmpeg_path())
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        else {
+            return;
+        };
+        let mut text = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let mut buf = [0u8; 8192];
+            while !cancelled.load(Ordering::SeqCst) {
+                match pipe.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => text.push_str(&String::from_utf8_lossy(&buf[..n])),
+                }
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        if cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(scan) = deinterlace::scan_from_idet(&text) {
+            let _ = tx.send(scan);
+            ctx.request_repaint();
+        }
+    })
+}
+
 /// Bucket signed 16-bit mono PCM into a peak envelope.
 ///
 /// Game capture often peaks well below full scale, which would draw as a flat
@@ -787,24 +881,104 @@ pub fn peaks_from_pcm(pcm: &[u8], buckets: usize) -> Vec<f32> {
     peaks
 }
 
-/// Filmstrip frames, decoding keyframes only so it stays fast.
+/// When the filmstrip's frames are taken, in the order they are fetched.
 ///
-/// Frames arrive as fixed-size raw RGB, so each one is a plain slice with no
-/// image parsing. They are emitted as they arrive and the strip fills in.
-pub fn load_thumbnails(path: &str, ctx: egui::Context) -> Loader<egui::ColorImage> {
-    let args = [
+/// A fixed budget spread evenly over the file -- one slot per
+/// [`THUMB_MIN_INTERVAL`], at most [`MAX_THUMBS`] -- with each frame taken at
+/// the start of its slot, so frame `i` is drawn from its own time to the next
+/// one's and the first starts at zero.
+///
+/// The order is coarse to fine (bit-reversed): the first few cover the whole
+/// file, and each later one splits a gap in two. The strip is all there almost
+/// at once and sharpens, rather than filling in left to right.
+pub fn thumb_schedule(duration: f64) -> Vec<f64> {
+    if !duration.is_finite() || duration <= 0.0 {
+        return Vec::new();
+    }
+    let count = ((duration / THUMB_MIN_INTERVAL).ceil() as usize).clamp(1, MAX_THUMBS);
+    // Walk the fractions 0, 1/2, 1/4, 3/4, 1/8 ... of the next power of two up
+    // and map each onto a slot, keeping the first visit to each. Bit-reversing
+    // the slot numbers directly would skip the ones past `count` and bunch the
+    // early frames into the start of the file.
+    let span = count.next_power_of_two();
+    let bits = span.trailing_zeros();
+    let mut seen = vec![false; count];
+    let mut slots = Vec::with_capacity(count);
+    for j in 0..span {
+        let fraction = if bits == 0 {
+            0
+        } else {
+            j.reverse_bits() >> (usize::BITS - bits)
+        };
+        let slot = fraction * count / span;
+        if !seen[slot] {
+            seen[slot] = true;
+            slots.push(slot);
+        }
+    }
+    slots
+        .into_iter()
+        .map(|i| duration * i as f64 / count as f64)
+        .collect()
+}
+
+/// Filmstrip frames: a fixed number of them, one decoder at a time.
+///
+/// Each frame is its own short ffmpeg run: seek to the slot, decode the one
+/// keyframe at or before it, stop. That is a bounded amount of work however
+/// long the file is or however its keyframes are spaced -- decoding every
+/// keyframe in one pass was the whole file on an all-intra source, at full
+/// speed on every core. One thread, run one after another, keeps the strip to
+/// a single core while the preview is the thing being looked at.
+pub fn load_thumbnails(info: &MediaInfo, ctx: egui::Context) -> Loader<(f64, egui::ColorImage)> {
+    let schedule = thumb_schedule(info.duration);
+    if schedule.is_empty() {
+        return Loader::default();
+    }
+    let path = info.path.clone();
+    Loader::run(ctx, move |tx, cancelled, ctx| {
+        for at in schedule {
+            if cancelled.load(Ordering::SeqCst) {
+                return;
+            }
+            let Some(image) = thumbnail_at(&path, at, cancelled) else {
+                continue;
+            };
+            if tx.send((at, image)).is_err() {
+                return;
+            }
+            ctx.request_repaint();
+        }
+    })
+}
+
+/// The arguments for one filmstrip frame.
+///
+/// `-noaccurate_seek` with keyframes-only decoding hands back the keyframe the
+/// seek landed on, rather than decoding forward to the exact instant; for a
+/// picture 106 pixels wide the nearest keyframe is the right frame.
+pub fn thumbnail_args(path: &str, at: f64) -> Vec<String> {
+    [
         "-v",
         "error",
         "-nostdin",
+        "-threads",
+        "1",
         "-skip_frame",
         "nokey",
+        "-noaccurate_seek",
+        "-ss",
+        &format!("{at:.3}"),
         "-i",
         path,
         "-an",
+        "-sn",
+        "-frames:v",
+        "1",
         "-vf",
         &format!("scale={THUMB_W}:{THUMB_H}"),
-        "-fps_mode",
-        "passthrough",
+        "-threads",
+        "1",
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -813,21 +987,24 @@ pub fn load_thumbnails(path: &str, ctx: egui::Context) -> Loader<egui::ColorImag
     ]
     .iter()
     .map(|s| s.to_string())
-    .collect();
+    .collect()
+}
 
-    Loader::spawn(ffmpeg_path(), args, ctx, |pipe, tx, cancelled, ctx| {
-        const FRAME_BYTES: usize = THUMB_W * THUMB_H * 3;
-        let mut buf: Vec<u8> = Vec::with_capacity(FRAME_BYTES * 2);
-        read_all(pipe, cancelled, |chunk| {
-            buf.extend_from_slice(chunk);
-            while buf.len() >= FRAME_BYTES {
-                let frame: Vec<u8> = buf.drain(..FRAME_BYTES).collect();
-                let image = egui::ColorImage::from_rgb([THUMB_W, THUMB_H], &frame);
-                if tx.send(image).is_err() {
-                    return;
-                }
-                ctx.request_repaint();
-            }
-        });
-    })
+fn thumbnail_at(path: &str, at: f64, cancelled: &Arc<AtomicBool>) -> Option<egui::ColorImage> {
+    const FRAME_BYTES: usize = THUMB_W * THUMB_H * 3;
+    let mut child = command(&ffmpeg_path())
+        .args(thumbnail_args(path, at))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut frame: Vec<u8> = Vec::with_capacity(FRAME_BYTES);
+    if let Some(pipe) = child.stdout.take() {
+        read_all(pipe, cancelled, |chunk| frame.extend_from_slice(chunk));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    (frame.len() >= FRAME_BYTES)
+        .then(|| egui::ColorImage::from_rgb([THUMB_W, THUMB_H], &frame[..FRAME_BYTES]))
 }

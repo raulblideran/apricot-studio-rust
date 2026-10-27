@@ -1,0 +1,28 @@
+# Keeps the Flatpak build cache (x264, x265 and ffmpeg) on main. A release runs
+# on its tag, and a tag can read caches saved on main but not another tag's, so
+# without this every release would compile those libraries from scratch (most
+# of an hour). Runs only when the manifest changes, plus on demand.
+name: Flatpak build cache
+on:
+  push:
+    branches: [main]
+    paths: ["packaging/io.github.raulblideran.ApricotStudio.yaml", ".github/workflows/flatpak-cache.yml"]
+  workflow_dispatch:
+
+jobs:
+  flatpak:
+    name: Build · Linux Flatpak (cache only)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      # Same manifest and cache-key as release.yml, so a release restores this cache.
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6.8
+        with:
+          manifest-path: packaging/io.github.raulblideran.ApricotStudio.yaml
+          bundle: apricot-studio.flatpak
+          cache-key: flatpak-builder-${{ hashFiles('packaging/io.github.raulblideran.ApricotStudio.yaml') }}
+          upload-artifact: false

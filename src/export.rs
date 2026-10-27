@@ -17,7 +17,8 @@ use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 
-use crate::ffmpeg::{command, ffmpeg_path};
+use crate::deinterlace::{self, Deinterlace, Method};
+use crate::ffmpeg::{command, ffmpeg_path, vspipe_path};
 use crate::media::MediaInfo;
 use crate::paths;
 
@@ -146,6 +147,8 @@ pub struct Options {
     /// 0 = quality-driven rather than size-driven.
     pub target_bytes: i64,
     pub quality: Quality,
+    /// Only ever set for an interlaced source, and only when asked for.
+    pub deinterlace: Option<Deinterlace>,
 }
 
 impl Default for Options {
@@ -155,6 +158,7 @@ impl Default for Options {
             audio: Audio::All,
             target_bytes: 0,
             quality: Quality::Source,
+            deinterlace: None,
         }
     }
 }
@@ -170,7 +174,21 @@ impl Options {
 
     /// Whether this reproduces the source rather than deviating from it.
     pub fn inherits_everything(&self) -> bool {
-        self.fmt == Format::Source && self.target_bytes == 0 && self.quality == Quality::Source
+        self.fmt == Format::Source
+            && self.target_bytes == 0
+            && self.quality == Quality::Source
+            && self.deinterlace.is_none()
+    }
+
+    /// The QTGMC choice, when that is the deinterlacer.
+    fn qtgmc(&self) -> Option<(deinterlace::Parity, deinterlace::QtgmcPreset)> {
+        match self.deinterlace? {
+            Deinterlace {
+                method: Method::Qtgmc(preset),
+                parity,
+            } => Some((parity, preset)),
+            _ => None,
+        }
     }
 }
 
@@ -182,6 +200,21 @@ pub struct Plan {
     pub duration: f64,
     pub label: String,
     pub lossless: bool,
+    /// Where the video comes from when it is not ffmpeg's own decode.
+    pub feed: Option<Feed>,
+}
+
+/// A VapourSynth script whose frames ffmpeg reads on stdin, for QTGMC.
+///
+/// The script is held as text and written out only when the export starts, so
+/// building a plan stays free of side effects and the tests can read it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Feed {
+    pub script: String,
+    pub script_path: String,
+    /// The source filter's index, removed along with the script.
+    pub cache_path: String,
+    pub args: Vec<String>,
 }
 
 // --------------------------------------------------------------------------
@@ -245,14 +278,19 @@ pub fn nearest_keyframe(t: f64, keyframes: &[f64]) -> Option<f64> {
 // --------------------------------------------------------------------------
 
 fn audio_maps(info: &MediaInfo, options: &Options) -> Vec<String> {
+    audio_maps_from(info, options, 0)
+}
+
+/// The same, for a source that is ffmpeg's `input`-th rather than its first.
+fn audio_maps_from(info: &MediaInfo, options: &Options, input: usize) -> Vec<String> {
     if !info.has_audio() || options.audio == Audio::None || options.fmt == Format::Gif {
         return Vec::new();
     }
     match options.audio {
         // Capture setups often record mic and desktop to separate tracks, and
         // dropping one is silent.
-        Audio::All => vec!["-map".into(), "0:a".into()],
-        Audio::Track(index) => vec!["-map".into(), format!("0:a:{index}")],
+        Audio::All => vec!["-map".into(), format!("{input}:a")],
+        Audio::Track(index) => vec!["-map".into(), format!("{input}:a:{index}")],
         Audio::None => Vec::new(),
     }
 }
@@ -589,6 +627,7 @@ fn build_lossless(
         duration,
         label: "stream copy".into(),
         lossless: true,
+        feed: None,
     }
 }
 
@@ -614,13 +653,68 @@ pub fn build(
         }
     }
 
-    let gop = gop_size(info, keyframes);
-    let (pre, video, label) = video_args(info, options, duration);
+    // A double-rate deinterlace makes two frames of each one, so the same
+    // keyframe spacing in time is twice as many frames.
+    let rate = options
+        .deinterlace
+        .map_or(1.0, |choice| choice.method.rate_multiplier());
+    let gop = (gop_size(info, keyframes) as f64 * rate).round() as i64;
+    let (pre, mut video, mut label) = video_args(info, options, duration);
+    if let Some(choice) = options.deinterlace {
+        if let Method::Bwdif(profile) = choice.method {
+            prepend_filter(
+                &mut video,
+                &deinterlace::bwdif_filter(profile, choice.parity),
+            );
+        }
+        label = format!("{label} · {}", choice.method.name());
+    }
 
     let mut out = args(&["-hide_banner", "-nostdin", "-y"]);
     out.extend(pre);
 
-    if options.fmt == Format::Gif {
+    let mut feed = None;
+    if let Some((parity, preset)) = options.qtgmc() {
+        // QTGMC runs in vspipe, which hands ffmpeg the deinterlaced clip on
+        // stdin, already cut to [start, end): the script trims by frame, so
+        // the pipe needs no seek of its own. The sound still comes from the
+        // source, seeked on the input to the same instant -- it is decoded or
+        // copied whole from there, so it cannot drift from the picture.
+        let first = (start * info.fps).round() as i64;
+        let last = (((start + duration) * info.fps).round() as i64 - 1).max(first);
+        let script_path = deinterlace::scratch_file("export.vpy")
+            .to_string_lossy()
+            .into_owned();
+        let cache_path = deinterlace::scratch_file("export.index")
+            .to_string_lossy()
+            .into_owned();
+        let script =
+            deinterlace::qtgmc_script(&info.path, &cache_path, first, last, parity, preset);
+        feed = Some(Feed {
+            args: deinterlace::vspipe_args(&script_path),
+            script,
+            script_path,
+            cache_path,
+        });
+
+        out.extend(args(&["-f", "yuv4mpegpipe", "-i", "pipe:0"]));
+        let audio = audio_maps_from(info, options, 1);
+        if !audio.is_empty() {
+            out.extend(vec![
+                "-ss".into(),
+                format!("{start:.6}"),
+                "-t".into(),
+                format!("{duration:.6}"),
+                "-i".into(),
+                info.path.clone(),
+            ]);
+        }
+        if options.fmt != Format::Gif {
+            out.extend(args(&["-map", "0:v:0"]));
+            out.extend(audio);
+        }
+        out.extend(vec!["-t".into(), format!("{duration:.6}")]);
+    } else if options.fmt == Format::Gif {
         // GIF seeks entirely on the input, and must. palettegen holds its
         // palette back until end of stream, and paletteuse buffers every frame
         // waiting for it, so whatever the graph is fed is decoded and kept in
@@ -747,7 +841,24 @@ pub fn build(
         duration,
         label,
         lossless: false,
+        feed,
     }
+}
+
+/// Put a filter in front of whatever the encoder arguments already filter
+/// with: the GIF palette chain, the VA-API upload, or nothing at all. It goes
+/// first because every later step -- scaling, the palette, the upload --
+/// should see whole frames, not fields.
+fn prepend_filter(video: &mut Vec<String>, filter: &str) {
+    for flag in ["-filter_complex", "-vf"] {
+        if let Some(index) = video.iter().position(|arg| arg == flag) {
+            if let Some(chain) = video.get_mut(index + 1) {
+                *chain = format!("{filter},{chain}");
+                return;
+            }
+        }
+    }
+    video.splice(0..0, ["-vf".to_string(), filter.to_string()]);
 }
 
 // --------------------------------------------------------------------------
@@ -799,37 +910,66 @@ impl Exporter {
             // reaching it, that file is still whole, and removing it would
             // destroy something this export never touched.
             let created_output = !paths::exists(&plan.output);
+            let fail = |message: &str| {
+                let _ = tx.send(ExportEvent::Finished {
+                    ok: false,
+                    message: message.into(),
+                });
+                ctx.request_repaint();
+            };
+
+            // QTGMC: vspipe first, its stdout becoming ffmpeg's stdin.
+            let mut feeder = None;
+            let mut stdin = Stdio::null();
+            if let Some(feed) = plan.feed.as_ref() {
+                let Some(vspipe) = vspipe_path() else {
+                    fail("QTGMC needs VapourSynth, which was not found");
+                    return;
+                };
+                if std::fs::write(&feed.script_path, &feed.script).is_err() {
+                    fail("could not write the QTGMC script to the temporary folder");
+                    return;
+                }
+                let spawned = command(&vspipe)
+                    .args(&feed.args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn();
+                let Ok(mut child) = spawned else {
+                    remove_feed_files(feed);
+                    fail("could not run VapourSynth (vspipe)");
+                    return;
+                };
+                stdin = child.stdout.take().map_or(Stdio::null(), Stdio::from);
+                let stderr = child.stderr.take();
+                feeder = Some((child, read_in_background(stderr)));
+            }
 
             let spawned = command(&ffmpeg_path())
                 .args(&plan.args)
-                .stdin(Stdio::null())
+                .stdin(stdin)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn();
             let mut child = match spawned {
                 Ok(child) => child,
                 Err(_) => {
-                    let _ = tx.send(ExportEvent::Finished {
-                        ok: false,
-                        message: "could not run ffmpeg".into(),
-                    });
-                    ctx.request_repaint();
+                    if let Some((mut vspipe, _)) = feeder {
+                        let _ = vspipe.kill();
+                        let _ = vspipe.wait();
+                    }
+                    if let Some(feed) = plan.feed.as_ref() {
+                        remove_feed_files(feed);
+                    }
+                    fail("could not run ffmpeg");
                     return;
                 }
             };
 
             // stderr is read on its own thread: ffmpeg writes to both pipes,
             // and a full one blocks the process rather than the reader.
-            let mut stderr_pipe = child.stderr.take();
-            let stderr_thread = thread::spawn(move || {
-                let mut text = String::new();
-                if let Some(pipe) = stderr_pipe.as_mut() {
-                    let mut buf = Vec::new();
-                    let _ = pipe.read_to_end(&mut buf);
-                    text = String::from_utf8_lossy(&buf).into_owned();
-                }
-                text
-            });
+            let stderr_thread = read_in_background(child.stderr.take());
 
             if let Some(mut stdout) = child.stdout.take() {
                 let mut pending = String::new();
@@ -837,6 +977,9 @@ impl Exporter {
                 loop {
                     if flag.load(Ordering::SeqCst) {
                         let _ = child.kill();
+                        if let Some((vspipe, _)) = feeder.as_mut() {
+                            let _ = vspipe.kill();
+                        }
                         break;
                     }
                     match stdout.read(&mut buf) {
@@ -859,6 +1002,16 @@ impl Exporter {
 
             let status = child.wait();
             let stderr = stderr_thread.join().unwrap_or_default();
+            // ffmpeg is done reading, so vspipe either finished or is blocked
+            // writing to a pipe nobody reads; either way it is not wanted now.
+            let feeder_said = feeder.map(|(mut vspipe, said)| {
+                let _ = vspipe.kill();
+                let _ = vspipe.wait();
+                said.join().unwrap_or_default()
+            });
+            if let Some(feed) = plan.feed.as_ref() {
+                remove_feed_files(feed);
+            }
             let cancelled = flag.load(Ordering::SeqCst);
             let code = status.as_ref().ok().and_then(|s| s.code()).unwrap_or(-1);
 
@@ -885,10 +1038,18 @@ impl Exporter {
                 }
             } else {
                 discard_broken();
-                let tail = stderr
-                    .lines()
-                    .rfind(|line| !line.trim().is_empty())
-                    .map(|line| line.to_string());
+                let last_line = |text: &str| {
+                    text.lines()
+                        .rfind(|line| !line.trim().is_empty())
+                        .map(|line| line.trim().to_string())
+                };
+                // When the script failed, ffmpeg only knows its input ended
+                // early; what went wrong is in vspipe's account.
+                let tail = feeder_said
+                    .as_deref()
+                    .and_then(last_line)
+                    .map(|line| format!("VapourSynth: {line}"))
+                    .or_else(|| last_line(&stderr));
                 ExportEvent::Finished {
                     ok: false,
                     message: tail.unwrap_or_else(|| format!("ffmpeg failed (exit {code})")),
@@ -931,6 +1092,22 @@ impl Exporter {
         }
         events
     }
+}
+
+/// Drain a pipe on its own thread and hand back everything it said.
+fn read_in_background<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    })
+}
+
+fn remove_feed_files(feed: &Feed) {
+    let _ = std::fs::remove_file(&feed.script_path);
+    let _ = std::fs::remove_file(&feed.cache_path);
 }
 
 /// One progress block from ffmpeg, or None if it did not carry a position.

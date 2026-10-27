@@ -19,6 +19,9 @@ mod common;
 
 use std::process::Command;
 
+use apricot_studio::deinterlace::{
+    self, BwdifProfile, Deinterlace, Method, Parity, QtgmcPreset, Scan,
+};
 use apricot_studio::export::{self, Audio, Format, Options, Quality};
 use apricot_studio::media;
 use common::{fixture, have_ffmpeg, keyframes, FPS};
@@ -631,4 +634,129 @@ fn each_preset_produces_a_smaller_file_than_the_last() {
     }
     assert!(sizes[0] > sizes[1], "{sizes:?}");
     assert!(sizes[1] > sizes[2], "{sizes:?}");
+}
+
+// ----- interlaced sources -------------------------------------------------
+
+fn tff_bwdif(profile: BwdifProfile) -> Options {
+    Options {
+        deinterlace: Some(Deinterlace {
+            method: Method::Bwdif(profile),
+            parity: Parity::Tff,
+        }),
+        ..Options::default()
+    }
+}
+
+#[test]
+fn an_interlaced_source_says_so_and_a_progressive_one_does_not() {
+    if !have_ffmpeg() {
+        return;
+    }
+    let interlaced = media::probe(&fixture("interlaced")).expect("probes");
+    assert_eq!(
+        deinterlace::scan_from_field_order(&interlaced.field_order),
+        Some(Scan::Interlaced(Parity::Tff)),
+        "field_order was {:?}",
+        interlaced.field_order
+    );
+    let progressive = media::probe(&fixture("allp")).expect("probes");
+    assert_eq!(
+        deinterlace::scan_from_field_order(&progressive.field_order),
+        Some(Scan::Progressive)
+    );
+}
+
+#[test]
+fn idet_finds_the_interlacing_by_looking() {
+    // The path taken when the container does not say: the pictures alone.
+    if !have_ffmpeg() {
+        return;
+    }
+    let source = fixture("interlaced");
+    let out = Command::new("ffmpeg")
+        .args(deinterlace::idet_args(&source, 6.0))
+        .output()
+        .expect("ffmpeg should run");
+    assert_eq!(
+        deinterlace::scan_from_idet(&String::from_utf8_lossy(&out.stderr)),
+        Some(Scan::Interlaced(Parity::Tff))
+    );
+}
+
+#[test]
+fn bwdif_at_its_slowest_turns_each_field_into_a_frame() {
+    let Some((_, out)) = run_export(
+        "bwdif_slowest",
+        "interlaced",
+        0.0,
+        2.0,
+        tff_bwdif(BwdifProfile::Slowest),
+    ) else {
+        return;
+    };
+    assert_eq!(probe_field(&out, "video", "field_order"), "progressive");
+    assert_eq!(probe_field(&out, "video", "r_frame_rate"), "60/1");
+    let frames = number_field(&out, "video", "nb_frames");
+    assert!(
+        (frames - 120.0).abs() <= 2.0,
+        "{frames} frames for 2s at 60p"
+    );
+}
+
+#[test]
+fn bwdif_fast_keeps_the_frame_rate() {
+    let Some((_, out)) = run_export(
+        "bwdif_fast",
+        "interlaced",
+        0.0,
+        2.0,
+        tff_bwdif(BwdifProfile::Fast),
+    ) else {
+        return;
+    };
+    assert_eq!(probe_field(&out, "video", "field_order"), "progressive");
+    assert_eq!(probe_field(&out, "video", "r_frame_rate"), "30/1");
+}
+
+#[test]
+fn qtgmc_exports_through_vspipe_where_it_is_installed() {
+    // Skips unless VapourSynth with QTGMC is on this machine; CI's on-demand
+    // Codex job is what runs it on Windows.
+    if !have_ffmpeg() || !deinterlace::qtgmc_available() {
+        return;
+    }
+    let source = fixture("interlaced");
+    let info = media::probe(&source).expect("probes");
+    let dir = std::env::temp_dir().join("apricot-rust-tests/out");
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let out = dir.join("qtgmc.mp4").to_string_lossy().into_owned();
+    let _ = std::fs::remove_file(&out);
+    let options = Options {
+        deinterlace: Some(Deinterlace {
+            method: Method::Qtgmc(QtgmcPreset::Faster),
+            parity: Parity::Tff,
+        }),
+        ..Options::default()
+    };
+    let plan = export::build(&info, 1.0, 2.0, &out, &keyframes(&source), &options);
+    let mut exporter = export::Exporter::default();
+    exporter.start(plan, egui::Context::default());
+    let message = loop {
+        let finished = exporter.poll().into_iter().find_map(|event| match event {
+            export::ExportEvent::Finished { ok, message } => Some((ok, message)),
+            export::ExportEvent::Progress { .. } => None,
+        });
+        if let Some(finished) = finished {
+            break finished;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(message.0, "QTGMC export failed: {}", message.1);
+    assert_eq!(probe_field(&out, "video", "r_frame_rate"), "60/1");
+    let frames = number_field(&out, "video", "nb_frames");
+    assert!(
+        (frames - 60.0).abs() <= 2.0,
+        "{frames} frames for 1s at 60p"
+    );
 }

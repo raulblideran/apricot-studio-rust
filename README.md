@@ -17,7 +17,7 @@ Download `apricot-studio-<version>.flatpak` from the
 [latest release](https://github.com/raulblideran/apricot-studio-rust/releases), then:
 
 ```sh
-flatpak install --user apricot-studio-1.2.1.flatpak
+flatpak install --user apricot-studio-1.3.0.flatpak
 ```
 
 Nothing else needed — the bundle carries its own ffmpeg built with libx264 and
@@ -46,7 +46,9 @@ needs but not where to find it, so it installs for anyone who already has that
 runtime and fails for everyone else — easy to miss when testing on a machine that
 has it.
 
-The first build compiles x264, x265 and ffmpeg; rebuilds take seconds. The
+`./build/publish-flatpak.sh` does all of the above in one go and writes the
+bundle to `dist/`. The first build compiles x264, x265 and ffmpeg; rebuilds take
+seconds. The
 manifest builds with `--share=network` so cargo can fetch its crates, which is
 fine locally and not allowed on Flathub — `packaging/flatpak/generate-cargo-sources.sh`
 writes the offline crate list that replaces it.
@@ -55,9 +57,28 @@ writes the offline crate list that replaces it.
 
 Download `apricot-studio-<version>-windows-x64.zip` from the
 [latest release](https://github.com/raulblideran/apricot-studio-rust/releases),
-unzip it anywhere, and run `apricot-studio.exe`. ffmpeg and ffprobe are in the
-zip beside it. The build is not signed, so SmartScreen asks before the first
-run: "More info", then "Run anyway".
+unzip it anywhere, and run `apricot-studio.exe`. The build is not signed, so
+SmartScreen asks before the first run: "More info", then "Run anyway".
+
+The zip carries the app alone. On first run, with no ffmpeg found, it asks
+whether to download the codecs, and puts them in a **`Codex`** folder beside
+`apricot-studio.exe`:
+
+- **ffmpeg and ffprobe** — the newest release build from
+  [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds/releases), in its
+  static "gpl" flavour: the most complete one published, with x264, x265,
+  SVT-AV1 and libvpx. About 195 MB, checked against the `checksums.sha256`
+  published beside it.
+- **QTGMC** — VapourSynth R81, the embeddable Python 3.13 it runs in, havsfunc,
+  and the plugins QTGMC calls (mvtools, znedi3, RemoveGrain, L-SMASH-Works),
+  each a fixed version with a fixed checksum (`src/codex.rs`). About 62 MB.
+
+Nothing downloaded runs while it installs, and a cancelled or failed download
+leaves the folder as it was. Unzipping a newer version over the old folder keeps
+`Codex`. Say no, and the app explains where else ffmpeg can come from; the
+offer comes back on the next launch. VapourSynth needs the
+[Visual C++ runtime](https://aka.ms/vc14/vc_redist.x64.exe), which most Windows
+machines already have.
 
 ### macOS
 
@@ -68,10 +89,29 @@ download.
 ### Building on Windows or macOS
 
 From a checkout, `cargo build --release` produces a working binary on either.
-The app looks for `ffmpeg` and `ffprobe` beside its own executable before
-falling back to `PATH`, so put them in the same folder or install them
-(`winget install Gyan.FFmpeg`, `brew install ffmpeg`). With neither, the app
-still starts and says exactly what is missing.
+The app looks for `ffmpeg` and `ffprobe` in a `Codex` folder beside its own
+executable, then beside it, then on `PATH` (`winget install Gyan.FFmpeg`,
+`brew install ffmpeg`). On Windows it offers to download them when none of those
+has them; on macOS it says exactly what is missing. `./build/publish-win.sh`
+(Git Bash) builds the release zip.
+
+### Releasing
+
+The way [Paramaja](https://github.com/raulblideran/paramaja) does it:
+
+```sh
+./build/bump-version.sh 1.3.1 "Short summary"   # Cargo.toml, Cargo.lock, CHANGELOG, metainfo
+$EDITOR CHANGELOG.md                            # list what changed under the new heading
+git commit -am "1.3.1: ..." && git tag v1.3.1 && git push origin main v1.3.1
+```
+
+The tag starts `.github/workflows/release.yml`: it checks the tag against
+Cargo.toml and CHANGELOG.md, builds the Windows zip and the Flatpak side by side,
+publishes the release with the zip as soon as that is ready (a few minutes), and
+attaches the Flatpak when its longer build lands — or says in the notes that it
+failed. The notes are the version's CHANGELOG section (`build/release-notes.sh`).
+`flatpak-cache.yml` keeps the compiled ffmpeg cached on main, which a tag can
+read, so a release only rebuilds the app.
 
 ### Straight from the source tree (Linux)
 
@@ -190,6 +230,29 @@ gets exceeded is a rejected upload.
 Only *Same as source* can be a lossless copy. WebM is software VP9 and roughly 5×
 an H.264 export; GIF has no size target, its rate control being a palette. A VP9 or
 AV1 source stays VP9 or AV1 rather than becoming H.264 behind your back.
+
+### Interlaced sources
+
+A camcorder's or a broadcast capture's video is often interlaced: each frame is
+two half-pictures taken a moment apart. The app finds out when the file opens —
+from the file's own flag, or, when it carries none, by having ffmpeg's `idet`
+look at a few hundred frames — and only then shows a **Deinterlace** menu:
+
+| | |
+|---|---|
+| **Off** | The default. The fields are kept as they are, and a cut on a keyframe is still a lossless copy. The badge says *interlaced*. |
+| **BWDIF** | ffmpeg's own deinterlacer. **Slowest** turns every field into a frame (50i becomes 50p, the motion of the original); **Fast** keeps the frame rate. |
+| **QTGMC** | VapourSynth's QTGMC: many times slower, and the best there is on motion. Its presets run from **Slowest (Placebo)** to *Faster*. |
+
+Both start at **Slowest**. The preview shows the picture deinterlaced as soon as
+one is chosen — with BWDIF in both cases, since QTGMC is nowhere near real time.
+
+QTGMC runs as `vspipe` feeding the encoder, so it needs VapourSynth with
+havsfunc, mvtools, znedi3, RemoveGrain and a source filter (L-SMASH, ffms2 or
+BestSource). On Windows those come in the Codex download — choosing QTGMC
+without them offers it. On Linux, the app uses a `vspipe` on `PATH` when one
+with those is installed; the Flatpak cannot reach the host's, so there it offers
+BWDIF alone.
 
 Track *names* need ffprobe 7+ to be read out of an MP4. On older versions every
 track is still found and selectable, just listed by number; the flatpak carries
@@ -341,21 +404,27 @@ playhead does not start a decoder per pixel.
 | `src/platform.rs` | show in folder, wastebasket, delete, the uri-list a drop arrives as |
 | `src/dnd.rs` | dropping a file on the window, on Wayland, where winit does not |
 | `vendor/smithay-clipboard/` | that crate with its drag-and-drop stubs filled in — `VENDORING.md` says why |
-| `src/ffmpeg.rs` | finding ffmpeg on three platforms |
+| `src/ffmpeg.rs` | finding ffmpeg (and VapourSynth's `vspipe`) on three platforms |
+| `src/deinterlace.rs` | telling interlaced from progressive, BWDIF's filter, QTGMC's script |
+| `src/codex.rs` | the Windows codec download: what is fetched, checked, and where it goes |
+| `build/` | version bump, release notes, the Windows zip and the Flatpak bundle |
 | `assets/fonts/` | Rajdhani, the Cyberpunk theme's typeface, under the OFL |
 | `tests/` | the test suite |
 
 ## Tests
 
 ```sh
-./run-tests.sh           # 282 tests, ~20s (real encodes)
-./run-tests.sh --fast    # ~13s, skips anything that invokes ffmpeg
+./run-tests.sh           # 329 tests, ~35s (real encodes)
+./run-tests.sh --fast    # ~18s, skips anything that invokes ffmpeg
 ./run-tests.sh -v        # one line per test
+
+# The real Codex download (~250 MB), into a scratch folder; CI runs it on Windows on demand
+cargo test --features codex --test units codex_download -- --ignored
 ```
 
 | Module | Covers |
 |---|---|
-| `units.rs` | timecode, output naming, keyframe matching, size arithmetic, track labels, chamfer geometry, deletion safety, dropped-file URIs, packaging completeness |
+| `units.rs` | timecode, output naming, keyframe matching, the filmstrip's schedule, interlace detection, the QTGMC script, the Codex download's rules, size arithmetic, track labels, chamfer geometry, deletion safety, dropped-file URIs, packaging completeness |
 | `commands.rs` | the ffmpeg arguments produced for every combination of options |
 | `edges.rs` | malformed input, hostile filenames, degenerate ranges, unreadable sources |
 | `encode.rs` | real exports: bit-identity, durations, A/V sync, GOP structure, formats |
@@ -377,8 +446,8 @@ called, while the button that called it took the app down.
 
 ## Ported from Python
 
-Version 1.3.0 and everything before it was Python and PyQt6. This is the same app
-in Rust, and the port was held to one standard: the ffmpeg commands do not change.
+Before this, Apricot Studio was Python and PyQt6, in a repository of its own, up
+to that version's 1.3.0; this one started again at 1.0.0. It is the same app in Rust, and the port was held to one standard: the ffmpeg commands do not change.
 `commands.rs` asserts the arguments the Python version produced, argument for
 argument, and `encode.rs` proves those commands still produce bit-identical copies,
 inherited GOP structures and size targets that fit.

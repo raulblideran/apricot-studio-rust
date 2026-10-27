@@ -30,8 +30,6 @@ pub const GRAB_PX: f32 = 10.0;
 pub const SNAP_PX: f32 = 7.0;
 /// Don't zoom in past a quarter second.
 pub const MIN_SPAN: f64 = 0.25;
-/// How many filmstrip frames are worth holding.
-pub const MAX_THUMBS: usize = 512;
 
 pub const HEIGHT: f32 = FILM_H + WAVE_H + RULER_H;
 
@@ -138,11 +136,8 @@ pub struct Timeline {
     in_point: f64,
     out_point: f64,
 
-    thumbs: Vec<TextureHandle>,
-    /// How many frames arrived, and how many of them one kept frame stands for.
-    /// Both are needed to keep a thinned strip lined up with keyframes.
-    thumbs_seen: usize,
-    thumb_stride: usize,
+    /// Filmstrip frames with the time each was taken, kept in time order.
+    thumbs: Vec<(f64, TextureHandle)>,
     peaks: Vec<f32>,
     keyframes: Vec<f64>,
 
@@ -166,8 +161,6 @@ impl Default for Timeline {
             in_point: 0.0,
             out_point: 0.0,
             thumbs: Vec::new(),
-            thumbs_seen: 0,
-            thumb_stride: 1,
             peaks: Vec::new(),
             keyframes: Vec::new(),
             drag: None,
@@ -186,8 +179,6 @@ impl Timeline {
         self.in_point = 0.0;
         self.out_point = self.duration;
         self.thumbs.clear();
-        self.thumbs_seen = 0;
-        self.thumb_stride = 1;
         self.peaks.clear();
         self.keyframes.clear();
         self.view_start = 0.0;
@@ -198,26 +189,19 @@ impl Timeline {
 
     // ----- data ---------------------------------------------------------
 
-    /// Take a frame into the strip, thinning it out when there are too many.
+    /// Take a frame into the strip at the time it was taken.
     ///
-    /// The strip decodes keyframes, and a two-hour recording has one every
-    /// couple of seconds -- thousands of images held in memory and a draw call
-    /// each per repaint. Once the strip is full, dropping every other frame
-    /// halves both and doubles the interval it samples at, which is what a long
-    /// file zoomed out wants regardless.
-    pub fn add_thumbnail(&mut self, texture: TextureHandle) {
-        if self.thumb_stride == 0 {
-            self.thumb_stride = 1;
-        }
-        if self.thumbs_seen % self.thumb_stride == 0 {
-            self.thumbs.push(texture);
-        }
-        self.thumbs_seen += 1;
-        if self.thumbs.len() > MAX_THUMBS {
-            let thinned: Vec<TextureHandle> = self.thumbs.iter().step_by(2).cloned().collect();
-            self.thumbs = thinned;
-            self.thumb_stride *= 2;
-        }
+    /// Frames arrive coarse to fine rather than left to right, so each goes in
+    /// where it belongs; until its neighbours arrive, the one before it is
+    /// drawn across the gap.
+    pub fn add_thumbnail(&mut self, at: f64, texture: TextureHandle) {
+        let index = self.thumbs.partition_point(|(t, _)| *t < at);
+        self.thumbs.insert(index, (at, texture));
+    }
+
+    /// The times of the frames held, in order.
+    pub fn thumb_times(&self) -> Vec<f64> {
+        self.thumbs.iter().map(|(t, _)| *t).collect()
     }
 
     pub fn set_peaks(&mut self, peaks: Vec<f32>) {
@@ -369,21 +353,8 @@ impl Timeline {
     }
 
     /// When thumbnail `i` was taken.
-    ///
-    /// The filmstrip decodes keyframes only, so the i-th frame kept is keyframe
-    /// `i * stride` -- the stride being 1 until the strip fills up and starts
-    /// thinning itself. The count compared is frames *seen*, not frames kept,
-    /// for the same reason. If the two loaders disagree, fall back to even
-    /// spacing.
     fn thumb_time(&self, i: usize) -> f64 {
-        if !self.keyframes.is_empty() && self.keyframes.len() == self.thumbs_seen {
-            let index = (i * self.thumb_stride).min(self.keyframes.len() - 1);
-            return self.keyframes[index];
-        }
-        if self.thumbs.len() > 1 {
-            return self.duration * i as f64 / (self.thumbs.len() - 1) as f64;
-        }
-        0.0
+        self.thumbs.get(i).map_or(0.0, |(t, _)| *t)
     }
 
     /// Where the two handles are on screen this frame.
@@ -666,7 +637,7 @@ impl Timeline {
             return;
         }
         let painter = painter.with_clip_rect(film);
-        for (i, texture) in self.thumbs.iter().enumerate() {
+        for (i, (_, texture)) in self.thumbs.iter().enumerate() {
             let t0 = self.thumb_time(i);
             let t1 = if i + 1 < self.thumbs.len() {
                 self.thumb_time(i + 1)
@@ -881,6 +852,6 @@ impl Timeline {
                 .partial_cmp(&(self.thumb_time(*b) - t).abs())
                 .unwrap_or(std::cmp::Ordering::Equal)
         })?;
-        self.thumbs.get(best)
+        self.thumbs.get(best).map(|(_, texture)| texture)
     }
 }

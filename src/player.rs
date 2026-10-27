@@ -36,6 +36,7 @@ use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+use crate::deinterlace::{self, Parity};
 use crate::ffmpeg::{command, ffmpeg_path};
 use crate::media::MediaInfo;
 
@@ -107,6 +108,9 @@ pub struct Player {
     still_generation: u64,
     pending_still: Option<f64>,
     error: Option<String>,
+    /// Set when the picture is to be shown deinterlaced, with the field that
+    /// comes first.
+    deinterlace: Option<Parity>,
 }
 
 impl Player {
@@ -130,7 +134,32 @@ impl Player {
         };
         self.info = Some(info.clone());
         self.position = 0.0;
+        self.deinterlace = None;
         self.request_still(0.0);
+    }
+
+    /// Show the picture deinterlaced, or stop doing so, from the current frame.
+    pub fn set_deinterlace(&mut self, parity: Option<Parity>) {
+        if self.deinterlace == parity {
+            return;
+        }
+        self.deinterlace = parity;
+        if self.info.is_some() {
+            self.seek(self.position);
+        }
+    }
+
+    /// The preview's filter chain: scaled to the panel, and made whole first
+    /// when the source is interlaced and that was asked for. Scaling first
+    /// would blend the two fields into each other and leave the deinterlacer
+    /// nothing to separate.
+    fn video_filter(&self) -> String {
+        let [width, height] = self.size;
+        let scale = format!("scale={width}:{height}");
+        match self.deinterlace {
+            Some(parity) => format!("{},{scale}", deinterlace::preview_filter(parity)),
+            None => scale,
+        }
     }
 
     pub fn close(&mut self) {
@@ -245,6 +274,7 @@ impl Player {
         let cancelled = Arc::new(AtomicBool::new(false));
         let [width, height] = self.size;
         let fps = self.fps;
+        let filter = self.video_filter();
 
         let (tx, rx) = sync_channel::<Frame>(FRAME_QUEUE);
         let flag = Arc::clone(&cancelled);
@@ -261,7 +291,7 @@ impl Player {
                 &path,
                 "-an",
                 "-vf",
-                &format!("scale={width}:{height}"),
+                &filter,
                 // Constant rate for the preview: the presentation time of a
                 // frame is then its index, and a variable-frame-rate capture
                 // does not need its timestamps carried through a pipe that has
@@ -478,6 +508,7 @@ impl Player {
         let (tx, rx) = sync_channel::<Frame>(1);
         let [width, height] = self.size;
         let path = info.path.clone();
+        let filter = self.video_filter();
         thread::spawn(move || {
             let args: Vec<String> = [
                 "-hide_banner",
@@ -492,7 +523,7 @@ impl Player {
                 "1",
                 "-an",
                 "-vf",
-                &format!("scale={width}:{height}"),
+                &filter,
                 "-f",
                 "rawvideo",
                 "-pix_fmt",

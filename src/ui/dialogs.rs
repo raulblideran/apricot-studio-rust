@@ -37,6 +37,10 @@ pub enum Act {
     DeleteForever,
     /// Leave the original alone.
     Keep,
+    /// Fetch these codecs into the Codex folder.
+    Download(Vec<crate::codex::Part>),
+    /// Stop a codec download that is under way.
+    CancelDownload,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +89,9 @@ pub struct Dialog {
     pub detail: String,
     pub buttons: Vec<Button>,
     pub warning: bool,
+    /// A bar under the text: `Some(fraction)` for work that can be measured,
+    /// `Some(-1.0)` for work that can only be said to be going on.
+    pub progress: Option<f32>,
 }
 
 impl Dialog {
@@ -96,6 +103,7 @@ impl Dialog {
             detail: detail.to_string(),
             buttons: vec![Button::new("OK", Act::Close).default_button().escape()],
             warning: false,
+            progress: None,
         }
     }
 
@@ -165,6 +173,15 @@ pub fn show(ctx: &egui::Context, look: &Look, dialog: &Dialog) -> Option<Act> {
                 if !dialog.detail.is_empty() {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new(&dialog.detail).color(theme::c32(t.text_dim)));
+                }
+                if let Some(fraction) = dialog.progress {
+                    ui.add_space(10.0);
+                    let bar = if fraction < 0.0 {
+                        egui::ProgressBar::new(0.0).animate(true)
+                    } else {
+                        egui::ProgressBar::new(fraction.clamp(0.0, 1.0)).show_percentage()
+                    };
+                    ui.add(bar.fill(look.accent()).desired_width(480.0));
                 }
                 ui.add_space(14.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

@@ -130,6 +130,7 @@ fn tone_args(freq: u32) -> Vec<String> {
 /// * `bframes` -- the same but encoded with B-frames, to prove inheritance both ways
 /// * `twoaudio` -- two Opus tracks, as a mic + desktop capture would have
 /// * `noaudio` -- video only
+/// * `interlaced` -- 30i, top field first, flagged as such
 pub fn fixture(kind: &str) -> String {
     let path = cache_dir().join(format!("{kind}.mp4"));
     let path_str = path.to_string_lossy().into_owned();
@@ -176,6 +177,27 @@ pub fn fixture(kind: &str) -> String {
             args.extend(video_args());
             args.extend(words(&["-bf", "0", "-an"]));
         }
+        "interlaced" => {
+            // 60p woven into 30i, top field first, and encoded as interlaced
+            // so the container says so: what a camcorder or a broadcast
+            // capture hands over.
+            args.extend(tone_args(440));
+            args.extend(words(&[
+                "-vf",
+                "tinterlace=mode=interleave_top,setfield=tff",
+            ]));
+            args.extend(video_args());
+            args.extend(words(&[
+                "-flags",
+                "+ildct+ilme",
+                "-bf",
+                "0",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "96k",
+            ]));
+        }
         other => panic!("unknown fixture {other:?}"),
     }
     args.push(path_str.clone());
@@ -191,22 +213,15 @@ pub fn keyframes(path: &str) -> Vec<f64> {
             "error",
             "-select_streams",
             "v:0",
-            "-skip_frame",
-            "nokey",
             "-show_entries",
-            "frame=pts_time",
+            "packet=pts_time,flags",
             "-of",
             "csv=p=0",
             path,
         ])
         .output()
         .expect("ffprobe should run");
-    let mut times: Vec<f64> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| line.trim().trim_end_matches(',').parse().ok())
-        .collect();
-    times.sort_by(|a: &f64, b| a.partial_cmp(b).unwrap());
-    times
+    apricot_studio::media::keyframes_from_packets(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// A [`MediaInfo`] standing in for a screen-recorder capture.
@@ -228,6 +243,7 @@ pub fn sample_info() -> MediaInfo {
         color_primaries: "bt709".into(),
         color_transfer: "bt709".into(),
         color_space: "bt709".into(),
+        field_order: "progressive".into(),
         audio: vec![AudioTrack {
             index: 0,
             codec: "opus".into(),

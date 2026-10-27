@@ -72,6 +72,24 @@ fn main() -> eframe::Result<()> {
         }
     }
 
+    // Windows only: the zip carries the app alone, so a first run has no
+    // codecs. Ask before the window opens -- with the system's own message
+    // box, the one place a question can be answered before anything else
+    // happens -- and let the window carry out the answer.
+    #[cfg(windows)]
+    let download_codecs = !apricot_studio::ffmpeg::missing().is_empty() && {
+        let (title, text) = apricot_studio::app::codecs_prompt();
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title(title)
+            .set_description(text)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show()
+            == rfd::MessageDialogResult::Yes
+    };
+    #[cfg(not(windows))]
+    let download_codecs = false;
+
     let size = Settings::load().window;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -88,7 +106,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Apricot Studio",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(cc, path)))),
+        Box::new(move |cc| Ok(Box::new(App::with_download(cc, path, download_codecs)))),
     )
 }
 

@@ -13,6 +13,7 @@
 
 mod common;
 
+use apricot_studio::deinterlace::{BwdifProfile, Deinterlace, Method, Parity};
 use apricot_studio::export::{self, Audio, Format, Options, Plan, Quality};
 use apricot_studio::media::{AudioTrack, MediaInfo};
 use common::{contains_sequence, has, index_of, sample_info, value_after, values_after};
@@ -1039,4 +1040,104 @@ fn every_run_overwrites_deliberately_and_reads_no_stdin() {
     assert!(has(&plan.args, "-y"));
     assert!(has(&plan.args, "-nostdin"));
     assert!(has(&plan.args, "-hide_banner"));
+}
+
+// ----- deinterlacing ------------------------------------------------------
+
+fn deinterlaced(method: Method) -> Options {
+    Options {
+        deinterlace: Some(Deinterlace {
+            method,
+            parity: Parity::Tff,
+        }),
+        ..Options::default()
+    }
+}
+
+#[test]
+fn bwdif_goes_first_in_the_filter_chain() {
+    let plan = plan_for(&sample_info(), 45.0, 58.0, deinterlaced(Method::BWDIF));
+    assert_eq!(
+        value_after(&plan.args, "-vf").as_deref(),
+        Some("bwdif=mode=send_field:parity=tff:deint=all")
+    );
+    assert!(plan.label.contains("BWDIF"), "{}", plan.label);
+    assert!(plan.feed.is_none());
+}
+
+#[test]
+fn a_deinterlaced_cut_on_a_keyframe_is_still_a_re_encode() {
+    // The cut starts on a keyframe, which alone would be a stream copy.
+    let plan = plan_for(&sample_info(), 2.0, 4.0, deinterlaced(Method::BWDIF));
+    assert!(!plan.lossless);
+    assert!(value_after(&plan.args, "-c").as_deref() != Some("copy"));
+}
+
+#[test]
+fn double_rate_doubles_the_keyframe_interval_in_frames() {
+    let single = plan_for(&sample_info(), 45.0, 58.0, Options::default());
+    let double = plan_for(&sample_info(), 45.0, 58.0, deinterlaced(Method::BWDIF));
+    let fast = plan_for(
+        &sample_info(),
+        45.0,
+        58.0,
+        deinterlaced(Method::Bwdif(BwdifProfile::Fast)),
+    );
+    assert_eq!(number(&double.args, "-g"), number(&single.args, "-g") * 2.0);
+    assert_eq!(number(&fast.args, "-g"), number(&single.args, "-g"));
+}
+
+#[test]
+fn bwdif_joins_the_front_of_an_existing_chain() {
+    let gif = Options {
+        fmt: Format::Gif,
+        ..deinterlaced(Method::BWDIF)
+    };
+    let plan = plan_for(&sample_info(), 45.0, 48.0, gif);
+    let chain = value_after(&plan.args, "-filter_complex").expect("the palette chain");
+    assert!(chain.starts_with("bwdif="), "{chain}");
+    assert!(chain.contains("palettegen"), "{chain}");
+    assert!(!has(&plan.args, "-vf"), "one chain, not two");
+}
+
+#[test]
+fn qtgmc_reads_its_picture_from_vspipe_and_its_sound_from_the_source() {
+    let plan = plan_for(&sample_info(), 45.0, 58.0, deinterlaced(Method::QTGMC));
+    let feed = plan.feed.as_ref().expect("QTGMC runs in vspipe");
+    assert!(contains_sequence(
+        &plan.args,
+        &["-f", "yuv4mpegpipe", "-i", "pipe:0"]
+    ));
+    assert_eq!(
+        index_of(&plan.args, "pipe:0")
+            .map(|i| i < index_of(&plan.args, "/tmp/sample.mp4").unwrap()),
+        Some(true),
+        "the picture is input 0, the source input 1"
+    );
+    assert!(contains_sequence(&plan.args, &["-map", "0:v:0"]));
+    assert!(contains_sequence(&plan.args, &["-map", "1:a"]));
+    assert!(
+        !has(&plan.args, "-vf"),
+        "no ffmpeg deinterlace on top of QTGMC"
+    );
+    // 45s to 58s of a 60 fps source: frames 2700 to 3479.
+    assert!(
+        feed.script.contains("first, last = 2700, min(3479,"),
+        "{}",
+        feed.script
+    );
+    assert!(feed.script.contains(r#"Preset="Placebo""#));
+    assert_eq!(feed.args, vec!["-c", "y4m", feed.script_path.as_str(), "-"]);
+    assert!(plan.label.contains("QTGMC"));
+}
+
+#[test]
+fn qtgmc_without_sound_opens_no_second_input() {
+    let options = Options {
+        audio: Audio::None,
+        ..deinterlaced(Method::QTGMC)
+    };
+    let plan = plan_for(&sample_info(), 45.0, 58.0, options);
+    assert!(!plan.args.iter().any(|arg| arg == "/tmp/sample.mp4"));
+    assert!(!plan.args.iter().any(|arg| arg.starts_with("1:a")));
 }

@@ -12,7 +12,8 @@
 //!
 //! * Flatpak puts one in `/app/bin`, ahead of the runtime's on `PATH`.
 //! * A Windows build is a folder the user unzipped, and the honest place to
-//!   look first is beside the .exe.
+//!   look first is beside the .exe -- in its `Codex` folder, which is where
+//!   the app downloads them to on first run (see [`crate::codex`]).
 //! * A macOS bundle keeps one in `Contents/MacOS` beside the binary, or the
 //!   user has Homebrew's on `PATH`.
 //!
@@ -22,22 +23,31 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 #[cfg(windows)]
 const EXE: &str = ".exe";
 #[cfg(not(windows))]
 const EXE: &str = "";
 
-static FFMPEG: OnceLock<PathBuf> = OnceLock::new();
-static FFPROBE: OnceLock<PathBuf> = OnceLock::new();
+/// Found once and kept, but not for good: a codec download lands new binaries
+/// while the app is running, and [`refresh`] makes the next call look again.
+static FFMPEG: RwLock<Option<PathBuf>> = RwLock::new(None);
+static FFPROBE: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// The folder the running executable is in.
+pub fn executable_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.parent().map(Path::to_path_buf)
+}
 
 fn beside_executable(name: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
+    let dir = executable_dir()?;
     // A macOS bundle keeps helpers in Resources; a zip on Windows keeps them
-    // in the same folder as the app.
+    // in its Codex folder once downloaded, or beside the app when someone put
+    // them there by hand.
     [
+        dir.join(crate::codex::FOLDER).join(format!("{name}{EXE}")),
         dir.join(format!("{name}{EXE}")),
         dir.join("ffmpeg").join(format!("{name}{EXE}")),
         dir.join("../Resources").join(format!("{name}{EXE}")),
@@ -67,16 +77,46 @@ fn locate(name: &str, override_var: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
+fn cached(cell: &RwLock<Option<PathBuf>>, name: &str, override_var: &str) -> PathBuf {
+    if let Some(path) = cell.read().ok().and_then(|found| found.clone()) {
+        return path;
+    }
+    let path = locate(name, override_var);
+    if let Ok(mut found) = cell.write() {
+        *found = Some(path.clone());
+    }
+    path
+}
+
 pub fn ffmpeg_path() -> PathBuf {
-    FFMPEG
-        .get_or_init(|| locate("ffmpeg", "APRICOT_FFMPEG"))
-        .clone()
+    cached(&FFMPEG, "ffmpeg", "APRICOT_FFMPEG")
 }
 
 pub fn ffprobe_path() -> PathBuf {
-    FFPROBE
-        .get_or_init(|| locate("ffprobe", "APRICOT_FFPROBE"))
-        .clone()
+    cached(&FFPROBE, "ffprobe", "APRICOT_FFPROBE")
+}
+
+/// Forget where the binaries were, after a download put new ones in place.
+pub fn refresh() {
+    for cell in [&FFMPEG, &FFPROBE] {
+        if let Ok(mut found) = cell.write() {
+            *found = None;
+        }
+    }
+    crate::deinterlace::forget_availability();
+}
+
+/// VapourSynth's `vspipe`, which QTGMC runs in: the Codex copy first, then
+/// `PATH`. `None` when there is neither -- unlike ffmpeg, its absence is
+/// ordinary, and only means one deinterlacer is not on offer.
+pub fn vspipe_path() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("APRICOT_VSPIPE").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(explicit));
+    }
+    executable_dir()
+        .map(|dir| crate::codex::vspipe_in(&dir.join(crate::codex::FOLDER)))
+        .filter(|path| path.is_file())
+        .or_else(|| on_path("vspipe"))
 }
 
 /// Whether both binaries are actually there, for the one-line complaint at

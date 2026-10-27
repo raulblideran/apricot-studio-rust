@@ -9,6 +9,8 @@
 //! without opening a window.
 
 pub mod app;
+pub mod codex;
+pub mod deinterlace;
 pub mod dnd;
 pub mod export;
 pub mod ffmpeg;

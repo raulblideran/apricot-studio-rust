@@ -10,6 +10,10 @@
 mod common;
 
 use apricot_studio::app::{delete_candidate, delete_prompt, Exported, MIN_CLIP_BYTES, VERSION};
+use apricot_studio::codex::{self, Take};
+use apricot_studio::deinterlace::{
+    self, BwdifProfile, Deinterlace, Method, Parity, QtgmcPreset, Scan,
+};
 use apricot_studio::export::{self, Audio, Format, Options, Quality};
 use apricot_studio::media::{self, AudioTrack};
 use apricot_studio::paths;
@@ -244,6 +248,419 @@ fn snapping_moves_to_the_nearest_within_tolerance() {
     let keyframes = [0.0, 2.0, 4.0];
     assert_eq!(export::snap_to_keyframe(2.4, &keyframes, 1.0), 2.0);
     assert_eq!(export::snap_to_keyframe(2.4, &keyframes, 0.1), 2.4);
+}
+
+#[test]
+fn keyframes_come_from_packet_flags_without_decoding() {
+    // ffprobe's packet lines: pts_time, then flags. K is a keyframe, D a
+    // discardable packet; a line with no time (N/A) is skipped.
+    let text = "0.000000,K__\n0.033333,___\n2.000000,K_D\nN/A,K__\n1.000000,K__\n2.000000,K__\n";
+    assert_eq!(media::keyframes_from_packets(text), vec![0.0, 1.0, 2.0]);
+}
+
+// ----- the filmstrip ------------------------------------------------------
+
+#[test]
+fn the_filmstrip_asks_for_a_fixed_number_of_frames_however_long_the_file() {
+    // Two hours, all-intra or not: the budget, never one per keyframe.
+    assert_eq!(media::thumb_schedule(7200.0).len(), media::MAX_THUMBS);
+    // A short clip is not asked for more frames than it has half-seconds.
+    assert_eq!(media::thumb_schedule(3.0).len(), 6);
+    assert_eq!(media::thumb_schedule(0.1).len(), 1);
+    assert!(media::thumb_schedule(0.0).is_empty());
+    assert!(media::thumb_schedule(f64::NAN).is_empty());
+}
+
+#[test]
+fn the_filmstrip_covers_the_file_from_zero_and_never_repeats() {
+    for duration in [3.0, 37.5, 90.0, 7200.0] {
+        let mut times = media::thumb_schedule(duration);
+        let count = times.len();
+        assert_eq!(times[0], 0.0, "the first frame fetched starts the strip");
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        times.dedup();
+        assert_eq!(times.len(), count, "every slot exactly once");
+        assert!(times.iter().all(|t| (0.0..duration).contains(t)));
+        let step = duration / count as f64;
+        for pair in times.windows(2) {
+            assert!((pair[1] - pair[0] - step).abs() < 1e-9, "even slots");
+        }
+    }
+}
+
+#[test]
+fn the_filmstrip_fills_coarse_to_fine() {
+    // The first frames fetched are spread across the file, not bunched at the
+    // start: after four, every quarter of a 90s file has one.
+    let first: Vec<f64> = media::thumb_schedule(90.0).into_iter().take(4).collect();
+    for quarter in 0..4 {
+        let (lo, hi) = (quarter as f64 * 22.5, (quarter + 1) as f64 * 22.5);
+        assert!(
+            first.iter().any(|t| (lo..hi).contains(t)),
+            "no early frame in {lo}..{hi}: {first:?}"
+        );
+    }
+}
+
+#[test]
+fn a_filmstrip_frame_is_one_keyframe_on_one_thread() {
+    let args = media::thumbnail_args("/v/a.mp4", 12.5);
+    assert_eq!(
+        common::value_after(&args, "-frames:v").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        common::value_after(&args, "-skip_frame").as_deref(),
+        Some("nokey")
+    );
+    assert_eq!(common::value_after(&args, "-ss").as_deref(), Some("12.500"));
+    assert!(common::has(&args, "-noaccurate_seek"));
+    assert!(args.iter().filter(|a| *a == "-threads").count() >= 1);
+    assert!(
+        common::index_of(&args, "-ss") < common::index_of(&args, "-i"),
+        "an input seek, so only the keyframe there is decoded"
+    );
+}
+
+#[test]
+fn the_strip_keeps_frames_in_time_order_as_they_arrive() {
+    let ctx = egui::Context::default();
+    let mut strip = timeline::Timeline::default();
+    strip.reset(90.0);
+    let image = || egui::ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]);
+    for at in media::thumb_schedule(90.0) {
+        let texture = ctx.load_texture("t", image(), egui::TextureOptions::LINEAR);
+        strip.add_thumbnail(at, texture);
+    }
+    let times = strip.thumb_times();
+    assert!(times.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(times.len(), media::thumb_schedule(90.0).len());
+    strip.reset(10.0);
+    assert!(strip.thumb_times().is_empty());
+}
+
+// ----- interlaced sources --------------------------------------------------
+
+#[test]
+fn the_field_order_is_read_by_its_first_letter() {
+    let tff = Some(Scan::Interlaced(Parity::Tff));
+    let bff = Some(Scan::Interlaced(Parity::Bff));
+    assert_eq!(deinterlace::scan_from_field_order("tt"), tff);
+    // What ffmpeg itself writes for top-field-first material.
+    assert_eq!(deinterlace::scan_from_field_order("tb"), tff);
+    assert_eq!(deinterlace::scan_from_field_order("bb"), bff);
+    assert_eq!(deinterlace::scan_from_field_order("bt"), bff);
+    assert_eq!(
+        deinterlace::scan_from_field_order("progressive"),
+        Some(Scan::Progressive)
+    );
+    // Not saying is not the same as saying progressive.
+    assert_eq!(deinterlace::scan_from_field_order(""), None);
+    assert_eq!(deinterlace::scan_from_field_order("unknown"), None);
+}
+
+#[test]
+fn idet_is_read_from_its_last_multi_frame_line() {
+    let stderr = "\
+[Parsed_idet_0 @ 0x1] Repeated Fields: Neither:   0 Top:     0 Bottom:     0
+[Parsed_idet_0 @ 0x1] Single frame detection: TFF:   3 BFF:   0 Progressive:   9 Undetermined:   1
+[Parsed_idet_0 @ 0x1] Multi frame detection: TFF:     0 BFF:     0 Progressive:     0 Undetermined:     0
+[Parsed_idet_0 @ 0x2] Multi frame detection: TFF:   162 BFF:     0 Progressive:     4 Undetermined:   12
+";
+    assert_eq!(
+        deinterlace::scan_from_idet(stderr),
+        Some(Scan::Interlaced(Parity::Tff))
+    );
+    let bff = "Multi frame detection: TFF:   10 BFF:   200 Progressive:   5 Undetermined:   0";
+    assert_eq!(
+        deinterlace::scan_from_idet(bff),
+        Some(Scan::Interlaced(Parity::Bff))
+    );
+}
+
+#[test]
+fn a_scattering_of_interlaced_frames_does_not_make_a_film_interlaced() {
+    let film = "Multi frame detection: TFF:   40 BFF:   12 Progressive:   240 Undetermined:   8";
+    assert_eq!(deinterlace::scan_from_idet(film), Some(Scan::Progressive));
+    // Nothing decided, or no line at all: no verdict, rather than a guess.
+    let nothing = "Multi frame detection: TFF: 0 BFF: 0 Progressive: 0 Undetermined: 300";
+    assert_eq!(deinterlace::scan_from_idet(nothing), None);
+    assert_eq!(deinterlace::scan_from_idet("no idet here"), None);
+}
+
+#[test]
+fn idet_looks_at_a_bounded_stretch_on_one_core() {
+    let args = deinterlace::idet_args("/v/a.mkv", 100.0);
+    assert_eq!(common::value_after(&args, "-ss").as_deref(), Some("10.000"));
+    assert_eq!(
+        common::value_after(&args, "-frames:v").as_deref(),
+        Some(deinterlace::IDET_FRAMES.to_string().as_str())
+    );
+    assert_eq!(common::value_after(&args, "-threads").as_deref(), Some("1"));
+    assert_eq!(common::value_after(&args, "-vf").as_deref(), Some("idet"));
+}
+
+#[test]
+fn both_deinterlacers_start_at_their_slowest() {
+    assert_eq!(Method::BWDIF, Method::Bwdif(BwdifProfile::Slowest));
+    assert_eq!(Method::QTGMC, Method::Qtgmc(QtgmcPreset::Placebo));
+    assert_eq!(Method::BWDIF.profile_label(), "Slowest");
+    assert!(Method::QTGMC.profile_label().starts_with("Slowest"));
+    assert_eq!(deinterlace::QTGMC_PRESETS[0], QtgmcPreset::Placebo);
+    assert_eq!(deinterlace::BWDIF_PROFILES[0], BwdifProfile::Slowest);
+}
+
+#[test]
+fn the_slowest_profiles_keep_every_field() {
+    assert_eq!(Method::BWDIF.rate_multiplier(), 2.0);
+    assert_eq!(Method::QTGMC.rate_multiplier(), 2.0);
+    assert_eq!(Method::Bwdif(BwdifProfile::Fast).rate_multiplier(), 1.0);
+    assert_eq!(
+        deinterlace::bwdif_filter(BwdifProfile::Slowest, Parity::Tff),
+        "bwdif=mode=send_field:parity=tff:deint=all"
+    );
+    assert_eq!(
+        deinterlace::bwdif_filter(BwdifProfile::Fast, Parity::Bff),
+        "bwdif=mode=send_frame:parity=bff:deint=all"
+    );
+}
+
+#[test]
+fn the_qtgmc_script_cuts_by_frame_and_quotes_the_path() {
+    let script = deinterlace::qtgmc_script(
+        r#"C:\Videos\a "b".avi"#,
+        r"C:\Temp\x.index",
+        250,
+        499,
+        Parity::Bff,
+        QtgmcPreset::Placebo,
+    );
+    // A backslash or a quote in the path must reach Python intact.
+    assert!(script.contains(r#""C:\\Videos\\a \"b\".avi""#), "{script}");
+    assert!(
+        script.contains(r#"cachefile="C:\\Temp\\x.index""#),
+        "{script}"
+    );
+    assert!(script.contains("first, last = 250, min(499,"), "{script}");
+    assert!(
+        script.contains(r#"Preset="Placebo", TFF=False"#),
+        "{script}"
+    );
+    assert!(script.contains("set_output()"));
+    // Every line Python reads at the top level starts at the left edge.
+    for line in script.lines().filter(|l| !l.is_empty()) {
+        let indented = line.starts_with("    ");
+        let continues = line.trim_start().starts_with("clip = core.");
+        assert!(!indented || continues, "stray indent: {line:?}");
+    }
+}
+
+#[test]
+fn deinterlacing_is_never_a_stream_copy() {
+    let options = Options {
+        deinterlace: Some(Deinterlace {
+            method: Method::BWDIF,
+            parity: Parity::Tff,
+        }),
+        ..Options::default()
+    };
+    assert!(!options.inherits_everything());
+    assert!(Options::default().inherits_everything());
+}
+
+// ----- the Codex folder ---------------------------------------------------
+
+#[test]
+fn the_newest_static_gpl_ffmpeg_is_chosen() {
+    let names = [
+        "checksums.sha256",
+        "ffmpeg-master-latest-win64-gpl.zip",
+        "ffmpeg-n8.1-latest-win64-gpl-8.1.zip",
+        "ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip",
+        "ffmpeg-n9.0-latest-win64-lgpl-9.0.zip",
+        "ffmpeg-n9.0-latest-win64-gpl-9.0.zip",
+        "ffmpeg-n10.0-latest-linux64-gpl-10.0.tar.xz",
+        "ffmpeg-n8.10-latest-win64-gpl-8.10.zip",
+    ];
+    assert_eq!(
+        codex::pick_ffmpeg_asset(names),
+        Some("ffmpeg-n9.0-latest-win64-gpl-9.0.zip")
+    );
+    assert_eq!(codex::pick_ffmpeg_asset(["checksums.sha256"]), None);
+}
+
+#[test]
+fn a_checksum_is_found_by_exact_name() {
+    let list = "\
+0000000000000000000000000000000000000000000000000000000000000000  ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip
+ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789 *ffmpeg-n9.0-latest-win64-gpl-9.0.zip
+nothex  other.zip
+";
+    assert_eq!(
+        codex::checksum_for(list, "ffmpeg-n9.0-latest-win64-gpl-9.0.zip").as_deref(),
+        Some("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
+    );
+    assert_eq!(codex::checksum_for(list, "other.zip"), None);
+    assert_eq!(codex::checksum_for(list, "missing.zip"), None);
+}
+
+#[test]
+fn only_the_two_binaries_come_out_of_the_ffmpeg_zip() {
+    assert_eq!(
+        codex::ffmpeg_destination("ffmpeg-n9.0-latest-win64-gpl-9.0/bin/ffmpeg.exe"),
+        Some("ffmpeg.exe")
+    );
+    assert_eq!(
+        codex::ffmpeg_destination("ffmpeg-n9.0-latest-win64-gpl-9.0/bin/ffprobe.exe"),
+        Some("ffprobe.exe")
+    );
+    assert_eq!(
+        codex::ffmpeg_destination("ffmpeg-n9.0-latest-win64-gpl-9.0/bin/ffplay.exe"),
+        None
+    );
+    assert_eq!(codex::ffmpeg_destination("doc/ffmpeg.exe.html"), None);
+}
+
+#[test]
+fn archive_entries_land_where_the_table_says_and_nowhere_else() {
+    let tree = [Take::Tree {
+        from: "vapoursynth/",
+        into: "Lib/site-packages/vapoursynth/",
+        skip: ".pdb",
+    }];
+    assert_eq!(
+        codex::destination(&tree, "vapoursynth/vspipe.exe").as_deref(),
+        Some("Lib/site-packages/vapoursynth/vspipe.exe")
+    );
+    assert_eq!(codex::destination(&tree, "vapoursynth/vspipe.pdb"), None);
+    assert_eq!(
+        codex::destination(&tree, "vapoursynth-81.dist-info/RECORD"),
+        None
+    );
+    assert_eq!(codex::destination(&tree, "vapoursynth/"), None);
+    // Nothing climbs out of the folder, however the archive spells it.
+    assert_eq!(
+        codex::destination(&tree, "vapoursynth/../../evil.dll"),
+        None
+    );
+    assert_eq!(codex::destination(&tree, "vapoursynth\\..\\evil.dll"), None);
+
+    let file = [Take::File {
+        from: "x64/LSMASHSource.dll",
+        to: "Lib/site-packages/vapoursynth/plugins/LSMASHSource.dll",
+    }];
+    assert!(codex::destination(&file, "x64/LSMASHSource.dll").is_some());
+    assert_eq!(codex::destination(&file, "x86/LSMASHSource.dll"), None);
+}
+
+#[test]
+fn the_embedded_python_is_pointed_at_site_packages_once() {
+    let pth = "python313.zip\r\n.\r\n\r\n# Uncomment to run site.main() automatically\r\n#import site\r\n";
+    let once = codex::with_site_packages(pth);
+    assert!(once.lines().any(|line| line == "Lib\\site-packages"));
+    assert!(once.starts_with("python313.zip"));
+    assert_eq!(codex::with_site_packages(&once), once);
+}
+
+#[test]
+fn every_pinned_download_is_https_with_a_full_checksum() {
+    for pinned in codex::QTGMC_SET {
+        assert!(pinned.url.starts_with("https://"), "{}", pinned.name);
+        assert_eq!(pinned.sha256.len(), 64, "{}", pinned.name);
+        assert!(pinned.sha256.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!pinned.take.is_empty(), "{} keeps nothing", pinned.name);
+    }
+    // The three plugins QTGMC calls, its script, and a source filter.
+    let destinations: Vec<String> = codex::QTGMC_SET
+        .iter()
+        .flat_map(|pinned| pinned.take.iter())
+        .filter_map(|take| match take {
+            Take::File { to, .. } => Some(to.to_string()),
+            Take::Tree { .. } => None,
+        })
+        .collect();
+    for needed in [
+        "libmvtools.dll",
+        "vsznedi3.dll",
+        "nnedi3_weights.bin",
+        "RemoveGrainVS.dll",
+        "LSMASHSource.dll",
+        "havsfunc.py",
+    ] {
+        assert!(
+            destinations.iter().any(|to| to.ends_with(needed)),
+            "{needed} is not in the set"
+        );
+    }
+}
+
+#[test]
+fn vspipe_sits_three_folders_below_the_python_that_runs_it() {
+    let codex = std::path::Path::new("Codex");
+    let vspipe = codex::vspipe_in(codex);
+    let python_home = vspipe.ancestors().nth(4).expect("deep enough");
+    assert_eq!(python_home, codex.join(codex::VAPOURSYNTH));
+}
+
+/// The real download, into a scratch Codex folder: everything fetched, every
+/// checksum held, everything where VapourSynth and the app look for it. On
+/// Windows it then runs the QTGMC check script through the downloaded vspipe.
+///
+/// Ignored by default -- it fetches a quarter of a gigabyte. CI runs it on
+/// demand (`codex` in ci.yml); from Linux:
+///   cargo test --features codex --test units codex_download -- --ignored
+#[cfg(any(windows, feature = "codex"))]
+#[test]
+#[ignore]
+fn codex_download() {
+    let root = tempfile::tempdir().expect("a scratch folder");
+    let dir = root.path().join(codex::FOLDER);
+    let ctx = egui::Context::default();
+    let mut download = codex::Download::start(
+        vec![codex::Part::Ffmpeg, codex::Part::Qtgmc],
+        dir.clone(),
+        ctx,
+    );
+    let result = loop {
+        let finished = download.poll().into_iter().find_map(|event| match event {
+            codex::Progress::Finished(result) => Some(result),
+            codex::Progress::Step { .. } => None,
+        });
+        if let Some(result) = finished {
+            break result;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    result.expect("the download should succeed");
+    assert!(dir.join("ffmpeg.exe").is_file());
+    assert!(dir.join("ffprobe.exe").is_file());
+    assert!(codex::qtgmc_ready(&dir));
+    assert!(
+        !root.path().join("Codex.partial").exists(),
+        "the staging folder is cleared away"
+    );
+    let pth = std::fs::read_dir(dir.join(codex::VAPOURSYNTH))
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|e| e.path().extension().is_some_and(|x| x == "_pth"))
+        .expect("Python's ._pth");
+    let pth = std::fs::read_to_string(pth.path()).unwrap();
+    assert!(pth.contains("Lib\\site-packages"));
+
+    #[cfg(windows)]
+    {
+        let script = root.path().join("check.vpy");
+        std::fs::write(&script, deinterlace::QTGMC_CHECK).unwrap();
+        let out = std::process::Command::new(codex::vspipe_in(&dir))
+            .args(["-i", &script.to_string_lossy(), "-"])
+            .output()
+            .expect("vspipe should start");
+        assert!(
+            out.status.success(),
+            "QTGMC's check failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 // ----- size arithmetic ----------------------------------------------------
@@ -672,6 +1089,7 @@ fn every_format_and_quality_choice_is_offered_exactly_once() {
             audio: Audio::All,
             target_bytes: choice.target,
             quality: choice.quality,
+            deinterlace: None,
         }
         .inherits_everything()
     };

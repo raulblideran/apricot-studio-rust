@@ -9,6 +9,10 @@
 
 use egui::{Align, Color32, Key, Layout, RichText, Vec2};
 
+use crate::codex::{self, Part};
+use crate::deinterlace::{
+    self, BwdifProfile, Deinterlace, Method, QtgmcPreset, Scan, BWDIF_PROFILES, QTGMC_PRESETS,
+};
 use crate::dnd;
 use crate::export::{self, Audio, Exporter, Format, Options, Quality};
 use crate::media::{self, fmt_tc, parse_tc, Loader, MediaInfo};
@@ -54,6 +58,9 @@ pub const STEP_FWD: &str = "▶";
 pub const GLYPH_LABELS: &[&str] = &[
     PLAY, PAUSE, START, BACK_10S, BACK_1F, FWD_1F, FWD_10S, STEP_BACK, STEP_FWD,
 ];
+
+/// The header menu an interlaced file brings with it, while nothing is chosen.
+pub const DEINTERLACE: &str = "Deinterlace";
 
 /// What the empty picture says, and the name its click answers to.
 pub const OPEN_PROMPT: &str = "Open a video, or drop one here";
@@ -188,12 +195,41 @@ pub fn delete_candidate(record: Option<&Exported>) -> Option<(String, String)> {
     Some((source, clip))
 }
 
+/// The dialog a codec download shows while it runs.
+#[cfg(any(windows, feature = "codex"))]
+fn download_dialog(label: &str, done: u64, total: u64) -> Dialog {
+    let megabytes = |bytes: u64| bytes as f64 / 1_000_000.0;
+    let (text, progress) = if total > 0 {
+        (
+            format!(
+                "{label}  ·  {:.0} of {:.0} MB",
+                megabytes(done),
+                megabytes(total)
+            ),
+            done as f32 / total as f32,
+        )
+    } else if done > 0 {
+        (format!("{label}  ·  {:.0} MB", megabytes(done)), -1.0)
+    } else {
+        (format!("{label}…"), -1.0)
+    };
+    let folder = codex::codex_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|| codex::FOLDER.to_string());
+    Dialog {
+        progress: Some(progress),
+        ..Dialog::message("Downloading codecs", &text, &format!("Into {folder}"))
+            .with_buttons(vec![Button::new("Cancel", Act::CancelDownload).escape()])
+    }
+}
+
 /// Where to get the one thing the app cannot work without.
 fn missing_ffmpeg_detail() -> String {
     let where_it_looked = "It is looked for beside this application first, then on PATH.";
     let advice = if cfg!(target_os = "windows") {
-        "Install it with `winget install Gyan.FFmpeg`, or put ffmpeg.exe and \
-         ffprobe.exe in the same folder as apricot-studio.exe."
+        "Download them into the Codex folder with the button below, install them \
+         with `winget install Gyan.FFmpeg`, or put ffmpeg.exe and ffprobe.exe in \
+         the Codex folder beside apricot-studio.exe."
     } else if cfg!(target_os = "macos") {
         "Install it with `brew install ffmpeg`, or put ffmpeg and ffprobe in \
          the application bundle beside the binary."
@@ -203,6 +239,43 @@ fn missing_ffmpeg_detail() -> String {
          build carries its own and never needs this."
     };
     format!("{advice}\n\n{where_it_looked}")
+}
+
+/// Whether this build can fetch codecs itself: a Windows build always, any
+/// other only when compiled with the `codex` feature (the test suite's).
+const CAN_DOWNLOAD: bool = cfg!(any(windows, feature = "codex"));
+
+/// What the Codex folder is still missing.
+fn parts_needed() -> Vec<Part> {
+    let mut parts = Vec::new();
+    if !crate::ffmpeg::missing().is_empty() {
+        parts.push(Part::Ffmpeg);
+    }
+    if codex::codex_dir().is_some_and(|dir| !codex::qtgmc_ready(&dir)) {
+        parts.push(Part::Qtgmc);
+    }
+    parts
+}
+
+/// The question a Windows build asks before its window opens, when it has no
+/// ffmpeg. Asked with the system's own message box, before anything else is
+/// drawn, so the answer is in before the window needs it.
+pub fn codecs_prompt() -> (String, String) {
+    let parts = parts_needed();
+    let megabytes: u32 = parts.iter().map(|part| part.megabytes()).sum();
+    let names: Vec<&str> = parts.iter().map(|part| part.label()).collect();
+    (
+        "Codecs missing".to_string(),
+        format!(
+            "Apricot Studio needs codecs to open and export video, and they are \
+             not installed on this computer.\n\n\
+             Download them now? That is {} (about {megabytes} MB), from their \
+             official releases on GitHub and python.org, into the \"{}\" folder \
+             beside Apricot Studio.",
+            names.join(" and "),
+            codex::FOLDER
+        ),
+    )
 }
 
 /// What the delete flow is waiting on, so the answer can be acted on when it
@@ -274,7 +347,25 @@ pub struct App {
 
     keyframe_loader: Loader<Vec<f64>>,
     waveform_loader: Loader<Vec<f32>>,
-    thumb_loader: Loader<egui::ColorImage>,
+    thumb_loader: Loader<(f64, egui::ColorImage)>,
+    scan_loader: Loader<Scan>,
+
+    /// Whether the source is interlaced, once that is known.
+    scan: Option<Scan>,
+    /// The deinterlacer chosen. Off until asked for, so a cut on a keyframe
+    /// of an interlaced file is still a lossless copy.
+    deinterlacer: Option<Method>,
+    /// Where each method's profile was last left, so switching between the
+    /// two does not lose it.
+    bwdif_profile: BwdifProfile,
+    qtgmc_preset: QtgmcPreset,
+    /// Whether QTGMC can run here: `None` until the background check answers.
+    qtgmc_ok: Option<bool>,
+    qtgmc_check: Option<std::sync::mpsc::Receiver<bool>>,
+    #[cfg(any(windows, feature = "codex"))]
+    download: Option<codex::Download>,
+    /// What the current or last download was for, so a failure can retry it.
+    download_parts: Vec<Part>,
 
     in_text: String,
     out_text: String,
@@ -353,6 +444,16 @@ impl App {
             keyframe_loader: Loader::default(),
             waveform_loader: Loader::default(),
             thumb_loader: Loader::default(),
+            scan_loader: Loader::default(),
+            scan: None,
+            deinterlacer: None,
+            bwdif_profile: BwdifProfile::Slowest,
+            qtgmc_preset: QtgmcPreset::Placebo,
+            qtgmc_ok: None,
+            qtgmc_check: None,
+            #[cfg(any(windows, feature = "codex"))]
+            download: None,
+            download_parts: Vec::new(),
             in_text: fmt_tc(0.0),
             out_text: fmt_tc(0.0),
             out_dir: String::new(),
@@ -386,14 +487,35 @@ impl App {
         let missing = crate::ffmpeg::missing();
         if !missing.is_empty() {
             app.status = format!("{} not found", missing.join(" and "));
-            app.dialog = Some(Dialog::warning(
+            let mut dialog = Dialog::warning(
                 "ffmpeg is missing",
                 &format!(
                     "Apricot Studio needs {} to open or export anything.",
                     missing.join(" and ")
                 ),
                 &missing_ffmpeg_detail(),
-            ));
+            );
+            if CAN_DOWNLOAD {
+                dialog = dialog.with_buttons(vec![
+                    Button::new("Download codecs", Act::Download(parts_needed())).default_button(),
+                    Button::new("Close", Act::Close).escape(),
+                ]);
+            }
+            app.dialog = Some(dialog);
+        }
+        app
+    }
+
+    /// The window, with the answer to [`codecs_prompt`] already in: a yes
+    /// starts the download before the first frame is drawn.
+    pub fn with_download(
+        cc: &eframe::CreationContext<'_>,
+        path: Option<String>,
+        yes: bool,
+    ) -> Self {
+        let mut app = Self::new(cc, path);
+        if yes {
+            app.start_download(&cc.egui_ctx, parts_needed());
         }
         app
     }
@@ -415,6 +537,36 @@ impl App {
 
     pub fn is_loaded(&self) -> bool {
         self.loaded()
+    }
+
+    /// What the source was found to be, once the check has answered.
+    pub fn scan(&self) -> Option<Scan> {
+        self.scan
+    }
+
+    /// The deinterlacer that will be applied, if any.
+    pub fn deinterlacer(&self) -> Option<Method> {
+        self.deinterlacer
+    }
+
+    /// Choose a deinterlacer, or none. The preview follows at once.
+    pub fn set_deinterlacer(&mut self, method: Option<Method>) {
+        match method {
+            Some(Method::Bwdif(profile)) => self.bwdif_profile = profile,
+            Some(Method::Qtgmc(preset)) => self.qtgmc_preset = preset,
+            None => {}
+        }
+        self.deinterlacer = method;
+        let parity = self.deinterlace().map(|choice| choice.parity);
+        self.player.set_deinterlace(parity);
+        self.on_options_changed();
+    }
+
+    fn deinterlace(&self) -> Option<Deinterlace> {
+        Some(Deinterlace {
+            method: self.deinterlacer?,
+            parity: self.scan?.parity()?,
+        })
     }
 
     pub fn source_path(&self) -> Option<&str> {
@@ -544,9 +696,14 @@ impl App {
         self.timeline.reset(info.duration);
         self.keyframe_loader = media::load_keyframes(&path, ctx.clone());
         self.waveform_loader = media::load_waveform(&info, ctx.clone());
-        self.thumb_loader = media::load_thumbnails(&path, ctx.clone());
+        self.thumb_loader = media::load_thumbnails(&info, ctx.clone());
+        self.scan_loader = media::detect_scan(&info, ctx.clone());
+        self.scan = None;
 
         self.player.open(&info);
+        // A new file starts progressive until shown otherwise, and with no
+        // deinterlacer: the last file's choice says nothing about this one.
+        self.deinterlacer = None;
         self.rebuild_audio_options(&info);
         self.info = Some(info);
         // The two calls above hand out enabled controls on the strength of the
@@ -565,6 +722,7 @@ impl App {
         self.keyframe_loader.cancel();
         self.waveform_loader.cancel();
         self.thumb_loader.cancel();
+        self.scan_loader.cancel();
     }
 
     /// Say why a file would not open, and offer whatever can be done about it.
@@ -618,6 +776,8 @@ impl App {
         self.player.close();
         self.cancel_loaders();
         self.info = None;
+        self.scan = None;
+        self.deinterlacer = None;
         self.keyframes.clear();
         self.timeline.reset(0.0);
         self.out_dir.clear();
@@ -682,6 +842,7 @@ impl App {
                 choice.target
             },
             quality: choice.quality,
+            deinterlace: self.deinterlace(),
         }
     }
 
@@ -752,6 +913,16 @@ impl App {
             String::new()
         };
 
+        // An interlaced source left as it is gets said so, since the choice
+        // that would change it only appears for such a file.
+        let estimate = if self.scan.is_some_and(|scan| scan != Scan::Progressive)
+            && self.deinterlacer.is_none()
+        {
+            format!("{estimate}  ·  interlaced")
+        } else {
+            estimate
+        };
+
         if options.inherits_everything() && export::on_keyframe(start, &self.keyframes).is_some() {
             // Colour carries the distinction, and it is the theme's lossless
             // green rather than the accent -- an accent that could stand in for
@@ -762,6 +933,10 @@ impl App {
             ));
         }
         let label = export::encoder_label(info, &options);
+        let label = match options.deinterlace {
+            Some(choice) => format!("{label} · {}", choice.method.name()),
+            None => label,
+        };
         let detail = if options.target_bytes > 0 {
             format!("fitting {} MB", options.target_bytes / 1_000_000)
         } else if options.quality != Quality::Source {
@@ -1140,13 +1315,120 @@ impl App {
         if let Some(peaks) = self.waveform_loader.drain().pop() {
             self.timeline.set_peaks(peaks);
         }
-        for image in self.thumb_loader.drain() {
+        for (at, image) in self.thumb_loader.drain() {
+            // Named by time: egui keys debug output by name, and a name shared
+            // by every frame of the strip says nothing about which is which.
             let texture = ctx.load_texture(
-                format!("thumb{}", self.timeline.keyframes().len()),
+                format!("thumb@{at:.3}"),
                 image,
                 egui::TextureOptions::LINEAR,
             );
-            self.timeline.add_thumbnail(texture);
+            self.timeline.add_thumbnail(at, texture);
+        }
+        if let Some(scan) = self.scan_loader.drain().pop() {
+            self.scan = Some(scan);
+            if scan != Scan::Progressive {
+                self.check_qtgmc(ctx);
+            }
+        }
+        if let Some(rx) = self.qtgmc_check.as_ref() {
+            if let Ok(ok) = rx.try_recv() {
+                self.qtgmc_ok = Some(ok);
+                self.qtgmc_check = None;
+            }
+        }
+    }
+
+    /// Find out, off the interface thread, whether QTGMC can run. Starting
+    /// VapourSynth takes most of a second, and it is only worth asking once a
+    /// file has turned out to need it.
+    fn check_qtgmc(&mut self, ctx: &egui::Context) {
+        if self.qtgmc_ok.is_some() || self.qtgmc_check.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(deinterlace::qtgmc_available());
+            ctx.request_repaint();
+        });
+        self.qtgmc_check = Some(rx);
+    }
+
+    // ----- the Codex download -------------------------------------------
+
+    fn downloading(&self) -> bool {
+        #[cfg(any(windows, feature = "codex"))]
+        return self.download.as_ref().is_some_and(|d| d.running());
+        #[cfg(not(any(windows, feature = "codex")))]
+        false
+    }
+
+    fn start_download(&mut self, ctx: &egui::Context, parts: Vec<Part>) {
+        let _ = ctx;
+        if parts.is_empty() || self.downloading() {
+            return;
+        }
+        self.download_parts = parts.clone();
+        #[cfg(any(windows, feature = "codex"))]
+        {
+            let Some(dir) = codex::codex_dir() else {
+                return;
+            };
+            self.download = Some(codex::Download::start(parts, dir, ctx.clone()));
+            self.dialog = Some(download_dialog("Starting", 0, 0));
+        }
+    }
+
+    #[cfg(any(windows, feature = "codex"))]
+    fn poll_download(&mut self, ctx: &egui::Context) {
+        let Some(download) = self.download.as_mut() else {
+            return;
+        };
+        for event in download.poll() {
+            match event {
+                codex::Progress::Step { label, done, total } => {
+                    self.dialog = Some(download_dialog(&label, done, total));
+                }
+                codex::Progress::Finished(result) => {
+                    self.download = None;
+                    self.finish_download(ctx, result);
+                    return;
+                }
+            }
+        }
+    }
+
+    #[cfg(any(windows, feature = "codex"))]
+    fn finish_download(&mut self, ctx: &egui::Context, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                crate::ffmpeg::refresh();
+                self.dialog = None;
+                self.status = format!("Codecs installed in the {} folder", codex::FOLDER);
+                if self.download_parts.contains(&Part::Qtgmc) {
+                    self.qtgmc_ok = None;
+                    self.qtgmc_check = None;
+                    if self.scan.is_some_and(|scan| scan != Scan::Progressive) {
+                        self.check_qtgmc(ctx);
+                    }
+                }
+                if let Some(path) = self.pending_open.take() {
+                    self.load(ctx, &path);
+                }
+            }
+            Err(error) => {
+                let retry = Act::Download(self.download_parts.clone());
+                let (title, text) = if error == "Download cancelled" {
+                    ("Download cancelled", "Nothing was installed.")
+                } else {
+                    ("Download failed", "The codecs could not be downloaded.")
+                };
+                self.dialog = Some(Dialog::warning(title, text, &error).with_buttons(vec![
+                    Button::new("Try again", retry).default_button(),
+                    Button::new("Close", Act::Close).escape(),
+                ]));
+            }
         }
     }
 
@@ -1302,6 +1584,15 @@ impl App {
             Act::ConfirmForever => self.confirm_forever(),
             Act::DeleteForever => self.perform_delete(true),
             Act::Keep => self.keep_original(),
+            Act::Download(parts) => self.start_download(ctx, parts),
+            Act::CancelDownload => {
+                #[cfg(any(windows, feature = "codex"))]
+                if let Some(download) = self.download.as_ref() {
+                    download.cancel();
+                    // Stays up until the worker has stopped and said so.
+                    self.dialog = Some(download_dialog("Cancelling", 0, 0));
+                }
+            }
         }
     }
 }
@@ -1378,6 +1669,10 @@ impl App {
             }
             if let Some(path) = chosen {
                 self.load(ctx, &path);
+            }
+
+            if self.scan.is_some_and(|scan| scan != Scan::Progressive) {
+                self.deinterlace_menu(ui, &look);
             }
 
             ui.add_space(6.0);
@@ -1818,6 +2113,118 @@ impl App {
         });
     }
 
+    /// The Deinterlace menu, in the header beside Recent: the method, then
+    /// that method's profiles. Only there for an interlaced source, so a file
+    /// that has no use for it is not asked about it.
+    fn deinterlace_menu(&mut self, ui: &mut egui::Ui, look: &Look) {
+        let current = self.deinterlacer;
+        let title = match current {
+            Some(method) => format!("Deinterlace · {}", method.name()),
+            None => DEINTERLACE.to_string(),
+        };
+        let button = chrome::button(ui, look, &title, Kind::Menu, true)
+            .on_hover_text("This video is interlaced: two half-pictures per frame");
+        let mut picked: Option<Option<Method>> = None;
+        let mut offer_qtgmc = false;
+        let qtgmc_ok = self.qtgmc_ok == Some(true);
+        // On Windows an absent QTGMC is one download away, so it stays
+        // clickable and the click offers that download.
+        let qtgmc_clickable = qtgmc_ok || (CAN_DOWNLOAD && self.qtgmc_ok == Some(false));
+        egui::Popup::menu(&button).show(|ui| {
+            ui.set_min_width(220.0);
+            if ui
+                .selectable_label(current.is_none(), "Off")
+                .on_hover_text(
+                    "Keep the fields as they are. A cut on a keyframe stays a lossless copy.",
+                )
+                .clicked()
+            {
+                picked = Some(None);
+            }
+            if ui
+                .selectable_label(matches!(current, Some(Method::Bwdif(_))), "BWDIF")
+                .on_hover_text("ffmpeg's own deinterlacer: quick, and clean on most footage")
+                .clicked()
+            {
+                picked = Some(Some(Method::Bwdif(self.bwdif_profile)));
+            }
+            let qtgmc = ui
+                .add_enabled_ui(qtgmc_clickable, |ui| {
+                    ui.selectable_label(matches!(current, Some(Method::Qtgmc(_))), "QTGMC")
+                })
+                .inner
+                .on_hover_text(
+                    "VapourSynth's QTGMC: many times slower, and the best there is on \
+                     motion. The preview shows BWDIF; the export uses QTGMC.",
+                )
+                .on_disabled_hover_text(if self.qtgmc_ok.is_none() {
+                    "Looking for VapourSynth…"
+                } else {
+                    "Needs VapourSynth with QTGMC (havsfunc, mvtools, znedi3, \
+                     removegrain and a source filter), and vspipe on PATH"
+                });
+            if qtgmc.clicked() {
+                if qtgmc_ok {
+                    picked = Some(Some(Method::Qtgmc(self.qtgmc_preset)));
+                } else {
+                    offer_qtgmc = true;
+                }
+            }
+
+            let Some(method) = current else {
+                return;
+            };
+            ui.separator();
+            ui.label(RichText::new("Profile").color(theme::c32(self.theme.text_dim)));
+            match method {
+                Method::Bwdif(chosen) => {
+                    for profile in BWDIF_PROFILES {
+                        if ui
+                            .selectable_label(profile == chosen, profile.label())
+                            .on_hover_text(profile.tooltip())
+                            .clicked()
+                        {
+                            picked = Some(Some(Method::Bwdif(profile)));
+                        }
+                    }
+                }
+                Method::Qtgmc(chosen) => {
+                    for preset in QTGMC_PRESETS {
+                        if ui
+                            .selectable_label(preset == chosen, preset.label())
+                            .clicked()
+                        {
+                            picked = Some(Some(Method::Qtgmc(preset)));
+                        }
+                    }
+                }
+            }
+        });
+
+        if let Some(method) = picked {
+            self.set_deinterlacer(method);
+        }
+        if offer_qtgmc {
+            self.dialog = Some(
+                Dialog::message(
+                    "QTGMC is not installed",
+                    &format!(
+                        "Download QTGMC (about {} MB) into the {} folder?",
+                        Part::Qtgmc.megabytes(),
+                        codex::FOLDER
+                    ),
+                    "It runs in VapourSynth, which comes with it, along with the Python \
+                     it needs and the plugins QTGMC calls. Nothing else on this computer \
+                     is changed.",
+                )
+                .with_buttons(vec![
+                    Button::new("Download", Act::Download(vec![Part::Qtgmc])).default_button(),
+                    Button::new("Not now", Act::Close).escape(),
+                ]),
+            );
+        }
+    }
+
     fn export_row(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let look = self.look.clone();
         let loaded = self.loaded();
@@ -1891,8 +2298,12 @@ impl App {
             // against, and a theme that only half arrived is worse than none.
             ctx.set_fonts(theme::font_definitions());
             theme::apply(ctx, self.theme, &self.look.accent);
-            if let Some(path) = self.pending_open.take() {
-                self.load(ctx, &path);
+            // A file named on the command line waits for a codec download that
+            // is under way: opening it without ffmpeg only fails.
+            if !self.downloading() {
+                if let Some(path) = self.pending_open.take() {
+                    self.load(ctx, &path);
+                }
             }
             // Font definitions only take effect at the start of a pass, and a
             // theme with a face of its own asks for that face by name -- which
@@ -1904,6 +2315,8 @@ impl App {
         }
 
         self.drain_loaders(ctx);
+        #[cfg(any(windows, feature = "codex"))]
+        self.poll_download(ctx);
         self.poll_export();
         self.player.update(ctx);
         self.look.quiet = self.exporter.running() || self.player.playing();
